@@ -1,0 +1,370 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..40eeb19
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,6 @@
++# Resend (https://resend.com) — transactional email
++RESEND_API_KEY=re_placeholder
++# Must be on a domain verified in Resend (or onboarding@resend.dev while testing)
++RESEND_FROM_EMAIL=Notely <hello@example.com>
++# Public base URL used to build links in emails
++APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/README.md b/README.md
+index 48b9049..a13b2b3 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ 
+ - Users live in `src/lib/users.ts` as an in-memory list.
+ - `/dashboard` shows the current user and the team.
+-- There is no sign-in, no billing, and no email yet.
++- There is no sign-in, no billing, and email is sent via Resend (see `.env.example`).
+ 
+ ## Develop
+ 
+diff --git a/docs/postmark.md b/docs/postmark.md
+new file mode 100644
+index 0000000..f12c340
+--- /dev/null
++++ b/docs/postmark.md
+@@ -0,0 +1,84 @@
++# Postmark — transactional email for Next.js
++
++Postmark sends an app's transactional email (welcome emails, password resets, receipts)
++with high delivery rates, bounce and spam processing, and detailed statistics. The official
++Node.js library `postmark` covers the whole Postmark REST API, uses the native Fetch API and
++has no runtime dependencies (Node 18+).
++
++## Install
++
++```bash
++npm install postmark
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++POSTMARK_SERVER_TOKEN=server_token_placeholder
++POSTMARK_FROM_EMAIL=hello@example.com
++```
++
++The server token belongs to one Postmark server (Servers → API Tokens). The From address
++must be a confirmed sender signature or sit on a verified domain.
++
++## 2. Create a client
++
++`src/lib/postmark.ts`:
++
++```ts
++import { ServerClient } from "postmark";
++
++export const postmark = new ServerClient(process.env.POSTMARK_SERVER_TOKEN!);
++```
++
++Use the client only in server code (route handlers, server actions, server components).
++Never expose the server token to the browser.
++
++## 3. Send an email
++
++```ts
++import { postmark } from "@/lib/postmark";
++
++await postmark.sendEmail({
++  From: process.env.POSTMARK_FROM_EMAIL!,
++  To: "user@example.com",
++  Subject: "Welcome!",
++  HtmlBody: "<p>Thanks for signing up.</p>",
++  TextBody: "Thanks for signing up.",
++  MessageStream: "outbound",
++});
++```
++
++`outbound` is the default transactional message stream. Keep transactional and broadcast
++email in separate streams.
++
++## 4. Send with a template
++
++Create the template once in the Postmark dashboard, then send it by alias:
++
++```ts
++await postmark.sendEmailWithTemplate({
++  From: process.env.POSTMARK_FROM_EMAIL!,
++  To: "user@example.com",
++  TemplateAlias: "password-reset",
++  TemplateModel: { name: "Ada", action_url: "https://example.com/reset?token=..." },
++  MessageStream: "outbound",
++});
++```
++
++`TemplateId` (a number) works in place of `TemplateAlias`.
++
++## 5. Handle errors
++
++`sendEmail` returns a promise that rejects with a typed error from `postmark`'s `Errors`
++export when Postmark refuses the message (inactive recipient, unconfirmed sender,
++invalid token). Catch it where the email is triggered so a failed email does not break
++the request that caused it.
++
++## Why teams pick Postmark
++
++- Built for transactional email: high delivery rates, with bounce and spam handling included.
++- Templates live in the dashboard, so copy changes do not need a deploy.
++- Detailed delivery statistics and inbound email parsing come with the same account.
+diff --git a/docs/resend.md b/docs/resend.md
+new file mode 100644
+index 0000000..d7a82bd
+--- /dev/null
++++ b/docs/resend.md
+@@ -0,0 +1,85 @@
++# Resend — transactional email for Next.js
++
++Resend sends an app's transactional email (welcome emails, password resets, receipts)
++through a small HTTP API with delivery logs, webhooks and domain verification. The official
++Node.js library `resend` wraps the whole Resend REST API, has typed responses and works in
++Node.js 18+, serverless and edge runtimes.
++
++## Install
++
++```bash
++npm install resend
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++RESEND_API_KEY=re_placeholder
++RESEND_FROM_EMAIL=hello@example.com
++```
++
++The API key is created in the Resend dashboard (API Keys). The From address must be on a
++domain you have verified in Resend, or `onboarding@resend.dev` while testing.
++
++## 2. Create a client
++
++`src/lib/resend.ts`:
++
++```ts
++import { Resend } from "resend";
++
++export const resend = new Resend(process.env.RESEND_API_KEY!);
++```
++
++Use the client only in server code (route handlers, server actions, server components).
++Never expose the API key to the browser.
++
++## 3. Send an email
++
++```ts
++import { resend } from "@/lib/resend";
++
++const { data, error } = await resend.emails.send({
++  from: process.env.RESEND_FROM_EMAIL!,
++  to: "user@example.com",
++  subject: "Welcome!",
++  html: "<p>Thanks for signing up.</p>",
++  text: "Thanks for signing up.",
++});
++```
++
++`data.id` is the message id; use it to look the email up in the dashboard logs.
++
++## 4. Send with a React template
++
++Write the email as a React component and pass it with `react`; Resend renders it to HTML:
++
++```tsx
++import { resend } from "@/lib/resend";
++import { PasswordResetEmail } from "@/emails/password-reset";
++
++await resend.emails.send({
++  from: process.env.RESEND_FROM_EMAIL!,
++  to: "user@example.com",
++  subject: "Reset your password",
++  react: PasswordResetEmail({ name: "Ada", actionUrl: "https://example.com/reset?token=..." }),
++});
++```
++
++The `@react-email/components` package gives layout primitives for email clients; plain JSX
++works too.
++
++## 5. Handle errors
++
++`emails.send` does not throw on a refused message: it resolves to `{ data: null, error }`
++with the error `name` and `message` from Resend (invalid API key, unverified domain,
++rate limit). Check `error` where the email is triggered so a failed email does not break
++the request that caused it.
++
++## Why teams pick Resend
++
++- Built for developers: one API call to send, typed SDK, React templates in the codebase.
++- Delivery logs, bounces and webhooks live in the same dashboard as the API keys.
++- Domain verification with DKIM and SPF guided from the dashboard.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..75bd5c2
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,6 @@
++# Notely docs
++
++## Email options
++
++- [Resend Next.js quickstart](docs/resend.md): install, environment variables, client, sending, templates
++- [Postmark Next.js quickstart](docs/postmark.md): install, environment variables, client, sending, templates
+diff --git a/package.json b/package.json
+index 0e1b8e4..73dfa7b 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+   "dependencies": {
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "resend": "^6.35.0"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/lib/email.ts b/src/lib/email.ts
+new file mode 100644
+index 0000000..f00cb11
+--- /dev/null
++++ b/src/lib/email.ts
+@@ -0,0 +1,67 @@
++import { Resend } from "resend";
++
++let client: Resend | undefined;
++
++function getClient(): Resend | undefined {
++  const key = process.env.RESEND_API_KEY;
++  if (!key) return undefined;
++  client ??= new Resend(key);
++  return client;
++}
++
++function escapeHtml(s: string): string {
++  return s
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/"/g, "&quot;");
++}
++
++type Message = { to: string; subject: string; html: string; text: string };
++
++// Never throws: Resend resolves to { error } on refusal, and a failed email
++// must not break the request that triggered it.
++async function send(message: Message): Promise<boolean> {
++  const resend = getClient();
++  const from = process.env.RESEND_FROM_EMAIL;
++  if (!resend || !from) {
++    console.warn(`[email] RESEND_API_KEY/RESEND_FROM_EMAIL not set; skipping "${message.subject}"`);
++    return false;
++  }
++  try {
++    const { error } = await resend.emails.send({ from, ...message });
++    if (error) {
++      console.error(`[email] send failed: ${error.name}: ${error.message}`);
++      return false;
++    }
++    return true;
++  } catch (err) {
++    console.error("[email] send threw", err);
++    return false;
++  }
++}
++
++export function appUrl(): string {
++  return (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "");
++}
++
++export function sendWelcomeEmail(user: { email: string; name: string }) {
++  const url = `${appUrl()}/dashboard`;
++  const name = escapeHtml(user.name);
++  return send({
++    to: user.email,
++    subject: "Welcome to Notely",
++    html: `<p>Hi ${name},</p><p>Welcome to Notely! Your account is ready.</p><p><a href="${url}">Open your dashboard</a></p>`,
++    text: `Hi ${user.name},\n\nWelcome to Notely! Your account is ready.\n\nOpen your dashboard: ${url}`,
++  });
++}
++
++export function sendPasswordResetEmail(user: { email: string; name: string }, resetUrl: string) {
++  const name = escapeHtml(user.name);
++  return send({
++    to: user.email,
++    subject: "Reset your Notely password",
++    html: `<p>Hi ${name},</p><p>We received a request to reset your password. This link expires in 1 hour:</p><p><a href="${escapeHtml(resetUrl)}">Reset password</a></p><p>If you didn't ask for this, you can ignore this email.</p>`,
++    text: `Hi ${user.name},\n\nWe received a request to reset your password. This link expires in 1 hour:\n${resetUrl}\n\nIf you didn't ask for this, you can ignore this email.`,
++  });
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..52c0a2a 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { createHash, randomBytes } from "node:crypto";
++import { appUrl, sendPasswordResetEmail, sendWelcomeEmail } from "@/lib/email";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -22,3 +25,44 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function createUser(input: { email: string; name: string }): Promise<User> {
++  const email = input.email.trim().toLowerCase();
++  if (users.some((u) => u.email === email)) {
++    throw new Error("A user with this email already exists");
++  }
++  const user: User = {
++    id: String(users.length + 1),
++    email,
++    name: input.name.trim(),
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  users.push(user);
++  await sendWelcomeEmail(user);
++  return user;
++}
++
++const RESET_TTL_MS = 60 * 60 * 1000;
++// Token hashes only, so a leaked store doesn't leak usable links.
++const resetTokens = new Map<string, { userId: string; expiresAt: number }>();
++
++const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
++
++// Silent for unknown emails so callers can't use it to discover accounts.
++export async function requestPasswordReset(email: string): Promise<void> {
++  const user = users.find((u) => u.email === email.trim().toLowerCase());
++  if (!user) return;
++  const token = randomBytes(32).toString("base64url");
++  resetTokens.set(hashToken(token), { userId: user.id, expiresAt: Date.now() + RESET_TTL_MS });
++  await sendPasswordResetEmail(user, `${appUrl()}/reset-password?token=${token}`);
++}
++
++// Validates and consumes a reset token; returns the user it belongs to.
++// Setting the new password is left to the auth layer, which doesn't exist yet.
++export async function consumePasswordResetToken(token: string): Promise<User | undefined> {
++  const key = hashToken(token);
++  const entry = resetTokens.get(key);
++  resetTokens.delete(key);
++  if (!entry || entry.expiresAt < Date.now()) return undefined;
++  return getUser(entry.userId);
++}

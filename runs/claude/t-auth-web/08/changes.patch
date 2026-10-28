@@ -1,0 +1,439 @@
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..66dd789 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -36,6 +36,10 @@ yarn-error.log*
+ # vercel
+ .vercel
+ 
++# local sqlite db (Better Auth user store, see src/lib/auth.ts)
++/data/*.db
++/data/*.db-*
++
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/package.json b/package.json
+index 0e1b8e4..aa4bf44 100644
+--- a/package.json
++++ b/package.json
+@@ -9,12 +9,15 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "better-auth": "^1.7.3",
++    "better-sqlite3": "^12.11.1",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
++    "@types/better-sqlite3": "^9.6.0",
+     "@types/node": "^20",
+     "@types/react": "^19",
+     "@types/react-dom": "^19",
+diff --git a/src/app/api/auth/[...all]/route.ts b/src/app/api/auth/[...all]/route.ts
+new file mode 100644
+index 0000000..5b67b06
+--- /dev/null
++++ b/src/app/api/auth/[...all]/route.ts
+@@ -0,0 +1,4 @@
++import { auth } from "@/lib/auth";
++import { toNextJsHandler } from "better-auth/next-js";
++
++export const { GET, POST } = toNextJsHandler(auth);
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..adc3185 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,14 +1,26 @@
++import { redirect } from "next/navigation";
+ import { getCurrentUser, listUsers } from "@/lib/users";
++import { SignOutButton } from "@/components/sign-out-button";
+ 
+ export default async function DashboardPage() {
++  // Middleware only checks that a session cookie exists; this is the real
++  // check against the database. Redirect here if it turns out the cookie
++  // was stale/invalid.
+   const me = await getCurrentUser();
++  if (!me) {
++    redirect("/sign-in?from=/dashboard");
++  }
++
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <SignOutButton />
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me.name} ({me.email})
+       </p>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+diff --git a/src/app/sign-in/page.tsx b/src/app/sign-in/page.tsx
+new file mode 100644
+index 0000000..e13849c
+--- /dev/null
++++ b/src/app/sign-in/page.tsx
+@@ -0,0 +1,10 @@
++import { Suspense } from "react";
++import { AuthForm } from "@/components/auth-form";
++
++export default function SignInPage() {
++  return (
++    <Suspense>
++      <AuthForm mode="sign-in" />
++    </Suspense>
++  );
++}
+diff --git a/src/app/sign-up/page.tsx b/src/app/sign-up/page.tsx
+new file mode 100644
+index 0000000..8c71b22
+--- /dev/null
++++ b/src/app/sign-up/page.tsx
+@@ -0,0 +1,10 @@
++import { Suspense } from "react";
++import { AuthForm } from "@/components/auth-form";
++
++export default function SignUpPage() {
++  return (
++    <Suspense>
++      <AuthForm mode="sign-up" />
++    </Suspense>
++  );
++}
+diff --git a/src/components/auth-form.tsx b/src/components/auth-form.tsx
+new file mode 100644
+index 0000000..fd57acd
+--- /dev/null
++++ b/src/components/auth-form.tsx
+@@ -0,0 +1,129 @@
++"use client";
++
++import { useState } from "react";
++import { useRouter, useSearchParams } from "next/navigation";
++import { signIn, signUp } from "@/lib/auth-client";
++
++type Mode = "sign-in" | "sign-up";
++
++export function AuthForm({ mode }: { mode: Mode }) {
++  const router = useRouter();
++  const searchParams = useSearchParams();
++  const redirectTo = searchParams.get("from") || "/dashboard";
++
++  const [name, setName] = useState("");
++  const [email, setEmail] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++
++  async function handleSubmit(e: React.FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setLoading(true);
++
++    const { error: authError } =
++      mode === "sign-up"
++        ? await signUp.email({ name, email, password })
++        : await signIn.email({ email, password });
++
++    setLoading(false);
++
++    if (authError) {
++      setError(authError.message ?? "Something went wrong. Try again.");
++      return;
++    }
++
++    router.push(redirectTo);
++    router.refresh();
++  }
++
++  async function handleGoogle() {
++    setError(null);
++    await signIn.social({ provider: "google", callbackURL: redirectTo });
++  }
++
++  return (
++    <div className="mx-auto flex w-full max-w-sm flex-col gap-6 p-8">
++      <h1 className="text-2xl font-semibold">
++        {mode === "sign-up" ? "Create your account" : "Sign in"}
++      </h1>
++
++      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
++        {mode === "sign-up" && (
++          <input
++            type="text"
++            required
++            placeholder="Name"
++            value={name}
++            onChange={(e) => setName(e.target.value)}
++            className="rounded-md border border-black/[.08] px-3 py-2 text-sm dark:border-white/[.145] dark:bg-transparent"
++          />
++        )}
++        <input
++          type="email"
++          required
++          placeholder="Email"
++          value={email}
++          onChange={(e) => setEmail(e.target.value)}
++          className="rounded-md border border-black/[.08] px-3 py-2 text-sm dark:border-white/[.145] dark:bg-transparent"
++        />
++        <input
++          type="password"
++          required
++          minLength={8}
++          placeholder="Password"
++          value={password}
++          onChange={(e) => setPassword(e.target.value)}
++          className="rounded-md border border-black/[.08] px-3 py-2 text-sm dark:border-white/[.145] dark:bg-transparent"
++        />
++
++        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++
++        <button
++          type="submit"
++          disabled={loading}
++          className="mt-1 rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-50 dark:hover:bg-[#ccc]"
++        >
++          {loading
++            ? "Please wait…"
++            : mode === "sign-up"
++              ? "Create account"
++              : "Sign in"}
++        </button>
++      </form>
++
++      <div className="flex items-center gap-3 text-xs uppercase opacity-50">
++        <div className="h-px flex-1 bg-current" />
++        or
++        <div className="h-px flex-1 bg-current" />
++      </div>
++
++      <button
++        type="button"
++        onClick={handleGoogle}
++        className="rounded-full border border-black/[.08] px-5 py-2 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++      >
++        Continue with Google
++      </button>
++
++      <p className="text-sm opacity-70">
++        {mode === "sign-up" ? (
++          <>
++            Already have an account?{" "}
++            <a href="/sign-in" className="font-medium underline">
++              Sign in
++            </a>
++          </>
++        ) : (
++          <>
++            No account yet?{" "}
++            <a href="/sign-up" className="font-medium underline">
++              Sign up
++            </a>
++          </>
++        )}
++      </p>
++    </div>
++  );
++}
+diff --git a/src/components/sign-out-button.tsx b/src/components/sign-out-button.tsx
+new file mode 100644
+index 0000000..74bac6b
+--- /dev/null
++++ b/src/components/sign-out-button.tsx
+@@ -0,0 +1,27 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { signOut } from "@/lib/auth-client";
++
++export function SignOutButton() {
++  const router = useRouter();
++
++  return (
++    <button
++      type="button"
++      onClick={() =>
++        signOut({
++          fetchOptions: {
++            onSuccess: () => {
++              router.push("/sign-in");
++              router.refresh();
++            },
++          },
++        })
++      }
++      className="rounded-full border border-black/[.08] px-4 py-1.5 text-sm transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++    >
++      Sign out
++    </button>
++  );
++}
+diff --git a/src/lib/auth-client.ts b/src/lib/auth-client.ts
+new file mode 100644
+index 0000000..b88d19d
+--- /dev/null
++++ b/src/lib/auth-client.ts
+@@ -0,0 +1,7 @@
++import { createAuthClient } from "better-auth/react";
++
++export const authClient = createAuthClient({
++  baseURL: process.env.NEXT_PUBLIC_BETTER_AUTH_URL ?? "http://localhost:3000",
++});
++
++export const { signIn, signUp, signOut, useSession } = authClient;
+diff --git a/src/lib/auth.ts b/src/lib/auth.ts
+new file mode 100644
+index 0000000..0216fa3
+--- /dev/null
++++ b/src/lib/auth.ts
+@@ -0,0 +1,27 @@
++import path from "node:path";
++import Database from "better-sqlite3";
++import { betterAuth } from "better-auth";
++import { nextCookies } from "better-auth/next-js";
++
++// Local file-backed SQLite DB. Better Auth owns the schema (users, sessions,
++// accounts, verification tokens) and creates/migrates it on first run via
++// `npx @better-auth/cli migrate`. Exported so src/lib/users.ts can read the
++// "user" table directly for plain (non-admin) listing/lookup.
++export const db = new Database(path.join(process.cwd(), "data", "notely.db"));
++
++export const auth = betterAuth({
++  database: db,
++  secret: process.env.BETTER_AUTH_SECRET,
++  baseURL: process.env.BETTER_AUTH_URL ?? "http://localhost:3000",
++  emailAndPassword: {
++    enabled: true,
++  },
++  socialProviders: {
++    google: {
++      clientId: process.env.GOOGLE_CLIENT_ID ?? "",
++      clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
++    },
++  },
++  // Lets server actions/components set auth cookies directly.
++  plugins: [nextCookies()],
++});
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..8fe6f86 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { headers } from "next/headers";
++import { auth, db } from "@/lib/auth";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -5,20 +8,44 @@ export type User = {
+   createdAt: string;
+ };
+ 
+-const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+-];
++type UserRow = {
++  id: string;
++  email: string;
++  name: string;
++  createdAt: string | number | Date;
++};
++
++function toUser(row: UserRow): User {
++  return {
++    id: row.id,
++    email: row.email,
++    name: row.name,
++    createdAt: new Date(row.createdAt).toISOString().slice(0, 10),
++  };
++}
+ 
++// Users now live in Better Auth's own store (SQLite, see src/lib/auth.ts) —
++// this module just reads that "user" table and adapts it to the app's
++// existing User shape, so the rest of the app doesn't need to know Better
++// Auth exists.
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  const rows = db
++    .prepare("SELECT id, email, name, createdAt FROM user ORDER BY createdAt ASC")
++    .all() as UserRow[];
++  return rows.map(toUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  const row = db
++    .prepare("SELECT id, email, name, createdAt FROM user WHERE id = ?")
++    .get(id) as UserRow | undefined;
++  return row ? toUser(row) : undefined;
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Reads the real signed-in session from the request cookies. Returns
++// undefined when nobody is signed in.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const session = await auth.api.getSession({ headers: await headers() });
++  if (!session?.user) return undefined;
++  return toUser(session.user);
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..e1af38a
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,23 @@
++import { NextRequest, NextResponse } from "next/server";
++import { getSessionCookie } from "better-auth/cookies";
++
++// This only checks whether a session cookie is present — it does not
++// validate the session. It exists purely to redirect signed-out visitors
++// before they render the page. The actual check that matters happens
++// server-side in the protected page via getCurrentUser() (src/lib/users.ts),
++// which verifies the session against the database.
++export function proxy(request: NextRequest) {
++  const sessionCookie = getSessionCookie(request);
++
++  if (!sessionCookie) {
++    const signInUrl = new URL("/sign-in", request.url);
++    signInUrl.searchParams.set("from", request.nextUrl.pathname);
++    return NextResponse.redirect(signInUrl);
++  }
++
++  return NextResponse.next();
++}
++
++export const config = {
++  matcher: ["/dashboard"],
++};

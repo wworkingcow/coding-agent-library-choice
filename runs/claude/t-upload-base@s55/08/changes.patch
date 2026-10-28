@@ -1,0 +1,343 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..fb03141
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,11 @@
++# S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, ...). Placeholder values.
++S3_BUCKET=notely-uploads
++S3_REGION=us-east-1
++S3_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
++S3_SECRET_ACCESS_KEY=replace-me
++# Leave empty for AWS S3. Set for R2 / MinIO, e.g. https://<account>.r2.cloudflarestorage.com
++S3_ENDPOINT=
++# true for MinIO and some other self-hosted servers
++S3_FORCE_PATH_STYLE=false
++# Public base URL objects are served from (bucket public URL or CDN). Saved URLs are <this>/<key>.
++S3_PUBLIC_URL=https://notely-uploads.s3.us-east-1.amazonaws.com
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..2ff0c90 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@aws-sdk/client-s3": "^3.1157.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/notes/[id]/image/route.ts b/src/app/api/notes/[id]/image/route.ts
+new file mode 100644
+index 0000000..e04357b
+--- /dev/null
++++ b/src/app/api/notes/[id]/image/route.ts
+@@ -0,0 +1,48 @@
++import { NextResponse } from "next/server";
++import { deleteObject, MAX_IMAGE_BYTES, sniffImage, uploadNoteImage } from "@/lib/storage";
++import { getCurrentUser, getNote, setNoteImage } from "@/lib/users";
++
++export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
++  const { id } = await ctx.params;
++
++  const me = await getCurrentUser();
++  if (!me) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
++
++  const note = await getNote(id);
++  if (!note || note.userId !== me.id) {
++    return NextResponse.json({ error: "Note not found" }, { status: 404 });
++  }
++
++  const declared = Number(req.headers.get("content-length") ?? 0);
++  if (declared > MAX_IMAGE_BYTES + 64 * 1024) {
++    return NextResponse.json({ error: "Image too large (max 5 MB)" }, { status: 413 });
++  }
++
++  const form = await req.formData().catch(() => null);
++  const file = form?.get("file");
++  if (!(file instanceof File)) {
++    return NextResponse.json({ error: "Missing file" }, { status: 400 });
++  }
++  if (file.size > MAX_IMAGE_BYTES) {
++    return NextResponse.json({ error: "Image too large (max 5 MB)" }, { status: 413 });
++  }
++
++  const bytes = new Uint8Array(await file.arrayBuffer());
++  const type = sniffImage(bytes);
++  if (!type) {
++    return NextResponse.json({ error: "Only JPEG, PNG, GIF or WebP images" }, { status: 415 });
++  }
++
++  let uploaded;
++  try {
++    uploaded = await uploadNoteImage(me.id, note.id, bytes, type);
++  } catch (err) {
++    console.error("image upload failed", err);
++    return NextResponse.json({ error: "Upload failed" }, { status: 502 });
++  }
++
++  const previousKey = await setNoteImage(note.id, uploaded.url, uploaded.key);
++  if (previousKey) await deleteObject(previousKey).catch((e) => console.error("cleanup failed", e));
++
++  return NextResponse.json({ imageUrl: uploaded.url });
++}
+diff --git a/src/app/dashboard/actions.ts b/src/app/dashboard/actions.ts
+new file mode 100644
+index 0000000..48a6a2f
+--- /dev/null
++++ b/src/app/dashboard/actions.ts
+@@ -0,0 +1,13 @@
++"use server";
++
++import { revalidatePath } from "next/cache";
++import { createNote, getCurrentUser } from "@/lib/users";
++
++export async function createNoteAction(formData: FormData) {
++  const me = await getCurrentUser();
++  if (!me) throw new Error("Unauthorized");
++  const title = String(formData.get("title") ?? "").trim().slice(0, 200);
++  if (!title) return;
++  await createNote(me.id, title);
++  revalidatePath("/dashboard");
++}
+diff --git a/src/app/dashboard/image-upload.tsx b/src/app/dashboard/image-upload.tsx
+new file mode 100644
+index 0000000..0ff4907
+--- /dev/null
++++ b/src/app/dashboard/image-upload.tsx
+@@ -0,0 +1,47 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { useState } from "react";
++
++export function ImageUpload({ noteId }: { noteId: string }) {
++  const router = useRouter();
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string>();
++
++  async function onChange(e: React.ChangeEvent<HTMLInputElement>) {
++    const input = e.currentTarget;
++    const file = input.files?.[0];
++    if (!file) return;
++    setBusy(true);
++    setError(undefined);
++    try {
++      const body = new FormData();
++      body.set("file", file);
++      const res = await fetch(`/api/notes/${noteId}/image`, { method: "POST", body });
++      if (!res.ok) {
++        const data = await res.json().catch(() => ({}));
++        throw new Error(data.error ?? "Upload failed");
++      }
++      router.refresh();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "Upload failed");
++    } finally {
++      setBusy(false);
++      input.value = "";
++    }
++  }
++
++  return (
++    <div className="mt-2">
++      <input
++        type="file"
++        accept="image/jpeg,image/png,image/gif,image/webp"
++        disabled={busy}
++        onChange={onChange}
++        className="text-sm"
++      />
++      {busy && <span className="ml-2 text-sm opacity-70">Uploading…</span>}
++      {error && <p className="text-sm text-red-600">{error}</p>}
++    </div>
++  );
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..7f060c7 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,8 +1,13 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { createNoteAction } from "./actions";
++import { ImageUpload } from "./image-upload";
++import { getCurrentUser, listNotes, listUsers } from "@/lib/users";
++
++export const dynamic = "force-dynamic";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
+   const all = await listUsers();
++  const notes = me ? await listNotes(me.id) : [];
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+@@ -11,6 +16,30 @@ export default async function DashboardPage() {
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+ 
++      <h2 className="mt-8 text-lg font-medium">Notes</h2>
++      <form action={createNoteAction} className="mt-2 flex gap-2">
++        <input
++          name="title"
++          required
++          maxLength={200}
++          placeholder="New note"
++          className="flex-1 rounded border px-2 py-1 text-sm"
++        />
++        <button className="rounded border px-3 py-1 text-sm">Add</button>
++      </form>
++      <ul className="mt-4 space-y-4">
++        {notes.map((n) => (
++          <li key={n.id} className="text-sm">
++            <p className="font-medium">{n.title}</p>
++            {n.imageUrl && (
++              // eslint-disable-next-line @next/next/no-img-element
++              <img src={n.imageUrl} alt="" className="mt-2 max-h-48 rounded" />
++            )}
++            <ImageUpload noteId={n.id} />
++          </li>
++        ))}
++      </ul>
++
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+         {all.map((u) => (
+diff --git a/src/lib/storage.ts b/src/lib/storage.ts
+new file mode 100644
+index 0000000..2474c64
+--- /dev/null
++++ b/src/lib/storage.ts
+@@ -0,0 +1,66 @@
++import { randomUUID } from "node:crypto";
++import {
++  DeleteObjectCommand,
++  PutObjectCommand,
++  S3Client,
++} from "@aws-sdk/client-s3";
++
++// S3-compatible storage: works with AWS S3, Cloudflare R2, MinIO, etc.
++export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
++
++let client: S3Client | undefined;
++
++function env(name: string): string {
++  const v = process.env[name];
++  if (!v) throw new Error(`Missing env var ${name}`);
++  return v;
++}
++
++function getClient(): S3Client {
++  return (client ??= new S3Client({
++    region: process.env.S3_REGION ?? "auto",
++    endpoint: process.env.S3_ENDPOINT || undefined,
++    forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "true",
++    credentials: {
++      accessKeyId: env("S3_ACCESS_KEY_ID"),
++      secretAccessKey: env("S3_SECRET_ACCESS_KEY"),
++    },
++  }));
++}
++
++type ImageType = { mime: string; ext: string };
++
++// Sniff the real type from magic bytes; never trust the client-supplied type or filename.
++export function sniffImage(b: Uint8Array): ImageType | undefined {
++  const starts = (sig: number[], off = 0) => sig.every((v, i) => b[off + i] === v);
++  if (starts([0xff, 0xd8, 0xff])) return { mime: "image/jpeg", ext: "jpg" };
++  if (starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { mime: "image/png", ext: "png" };
++  if (starts([0x47, 0x49, 0x46, 0x38])) return { mime: "image/gif", ext: "gif" };
++  if (starts([0x52, 0x49, 0x46, 0x46]) && starts([0x57, 0x45, 0x42, 0x50], 8))
++    return { mime: "image/webp", ext: "webp" };
++  return undefined;
++}
++
++export async function uploadNoteImage(
++  userId: string,
++  noteId: string,
++  body: Uint8Array,
++  type: ImageType,
++): Promise<{ key: string; url: string }> {
++  const key = `notes/${userId}/${noteId}/${randomUUID()}.${type.ext}`;
++  await getClient().send(
++    new PutObjectCommand({
++      Bucket: env("S3_BUCKET"),
++      Key: key,
++      Body: body,
++      ContentType: type.mime,
++      CacheControl: "public, max-age=31536000, immutable",
++    }),
++  );
++  const base = env("S3_PUBLIC_URL").replace(/\/+$/, "");
++  return { key, url: `${base}/${key}` };
++}
++
++export async function deleteObject(key: string): Promise<void> {
++  await getClient().send(new DeleteObjectCommand({ Bucket: env("S3_BUCKET"), Key: key }));
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..9dda71d 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -22,3 +22,49 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export type Note = {
++  id: string;
++  userId: string;
++  title: string;
++  imageUrl?: string;
++  imageKey?: string;
++  createdAt: string;
++};
++
++// In-memory like `users`, but kept on globalThis so route handlers and pages share one store.
++const g = globalThis as unknown as { __notes?: Note[] };
++const notes: Note[] = (g.__notes ??= []);
++
++export async function listNotes(userId: string): Promise<Note[]> {
++  return notes.filter((n) => n.userId === userId);
++}
++
++export async function getNote(id: string): Promise<Note | undefined> {
++  return notes.find((n) => n.id === id);
++}
++
++export async function createNote(userId: string, title: string): Promise<Note> {
++  const note: Note = {
++    id: crypto.randomUUID(),
++    userId,
++    title,
++    createdAt: new Date().toISOString(),
++  };
++  notes.push(note);
++  return note;
++}
++
++/** Saves the image URL on the note and returns the previous storage key (if any) so the caller can delete it. */
++export async function setNoteImage(
++  id: string,
++  imageUrl: string,
++  imageKey: string,
++): Promise<string | undefined> {
++  const note = notes.find((n) => n.id === id);
++  if (!note) throw new Error("Note not found");
++  const previous = note.imageKey;
++  note.imageUrl = imageUrl;
++  note.imageKey = imageKey;
++  return previous;
++}

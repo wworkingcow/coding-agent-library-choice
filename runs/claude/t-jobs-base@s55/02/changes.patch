@@ -1,0 +1,125 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..eb04fe9
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,5 @@
++# Inngest (https://app.inngest.com) — placeholders, replace in production.
++# Not needed locally when running `npx inngest-cli@latest dev` (set INNGEST_DEV=1).
++INNGEST_EVENT_KEY=placeholder-event-key
++INNGEST_SIGNING_KEY=signkey-prod-placeholder
++# INNGEST_DEV=1
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..c286546 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,6 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++
++# allow the committed template
++!.env.example
+diff --git a/package.json b/package.json
+index 0e1b8e4..f95a174 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "inngest": "^4.26.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/inngest/route.ts b/src/app/api/inngest/route.ts
+new file mode 100644
+index 0000000..7996fc1
+--- /dev/null
++++ b/src/app/api/inngest/route.ts
+@@ -0,0 +1,5 @@
++import { serve } from "inngest/next";
++import { inngest } from "@/inngest/client";
++import { functions } from "@/inngest/functions";
++
++export const { GET, POST, PUT } = serve({ client: inngest, functions });
+diff --git a/src/inngest/client.ts b/src/inngest/client.ts
+new file mode 100644
+index 0000000..f113e1f
+--- /dev/null
++++ b/src/inngest/client.ts
+@@ -0,0 +1,4 @@
++import { Inngest } from "inngest";
++
++// Reads INNGEST_EVENT_KEY / INNGEST_SIGNING_KEY from the environment.
++export const inngest = new Inngest({ id: "notely" });
+diff --git a/src/inngest/functions.ts b/src/inngest/functions.ts
+new file mode 100644
+index 0000000..c8b7e0c
+--- /dev/null
++++ b/src/inngest/functions.ts
+@@ -0,0 +1,25 @@
++import { inngest } from "./client";
++
++export const USER_CREATED_EVENT = "notely/user.created";
++export const REMINDER_DELAY_MS = 10 * 60 * 1000;
++
++export type UserCreatedData = { userId: string; email: string; name: string };
++
++// Runs once per created user. The event is sent with a future `ts`, so Inngest
++// holds it until then. A thrown error is retried with backoff (up to `retries`).
++export const userReminder = inngest.createFunction(
++  {
++    id: "user-reminder",
++    retries: 4,
++    triggers: [{ event: USER_CREATED_EVENT }],
++  },
++  async ({ event, attempt, logger }) => {
++    const { userId, email, name } = event.data as UserCreatedData;
++    logger.info(
++      `Reminder: say hello to ${name} <${email}> (user ${userId}), attempt ${attempt + 1}`,
++    );
++    return { userId, reminded: true };
++  },
++);
++
++export const functions = [userReminder];
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..eb03f87 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,7 @@
++import { inngest } from "@/inngest/client";
++import { USER_CREATED_EVENT, REMINDER_DELAY_MS, type UserCreatedData } from "@/inngest/functions";
++
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -22,3 +26,26 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function createUser(input: { email: string; name: string }): Promise<User> {
++  const user: User = {
++    id: String(users.length + 1),
++    email: input.email,
++    name: input.name,
++    createdAt: new Date().toISOString(),
++  };
++  users.push(user);
++
++  // Schedule the reminder job. If scheduling fails, the user is still created.
++  try {
++    await inngest.send({
++      name: USER_CREATED_EVENT,
++      data: { userId: user.id, email: user.email, name: user.name } satisfies UserCreatedData,
++      ts: Date.now() + REMINDER_DELAY_MS,
++    });
++  } catch (err) {
++    console.error(`Failed to schedule reminder for user ${user.id}`, err);
++  }
++
++  return user;
++}

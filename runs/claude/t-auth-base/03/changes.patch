@@ -1,0 +1,581 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..d6a0867
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,10 @@
++# Auth.js (next-auth v5) — copy to .env.local and fill in real values.
++
++# Random secret used to sign session tokens. Generate one with:
++#   openssl rand -base64 33
++AUTH_SECRET=replace-with-a-random-secret
++
++# Google OAuth credentials (console.cloud.google.com > APIs & Services > Credentials).
++# Authorized redirect URI: http://localhost:3000/api/auth/callback/google
++AUTH_GOOGLE_ID=replace-with-google-client-id
++AUTH_GOOGLE_SECRET=replace-with-google-client-secret
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/next.config.ts b/next.config.ts
+index e9ffa30..f2fcd58 100644
+--- a/next.config.ts
++++ b/next.config.ts
+@@ -2,6 +2,9 @@ import type { NextConfig } from "next";
+ 
+ const nextConfig: NextConfig = {
+   /* config options here */
++  // Repo convention: no AI-agent instruction files (see git history). Don't let
++  // Next.js auto-generate AGENTS.md / CLAUDE.md on dev/build.
++  agentRules: false,
+ };
+ 
+ export default nextConfig;
+diff --git a/package.json b/package.json
+index 0e1b8e4..ae94a3b 100644
+--- a/package.json
++++ b/package.json
+@@ -9,7 +9,9 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "bcryptjs": "^3.0.3",
+     "next": "16.3.4",
++    "next-auth": "^5.0.0-beta.32",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+diff --git a/src/app/api/auth/[...nextauth]/route.ts b/src/app/api/auth/[...nextauth]/route.ts
+new file mode 100644
+index 0000000..c55a45e
+--- /dev/null
++++ b/src/app/api/auth/[...nextauth]/route.ts
+@@ -0,0 +1,3 @@
++import { handlers } from "@/lib/auth";
++
++export const { GET, POST } = handlers;
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..b2db43c 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,15 +1,23 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { auth } from "@/lib/auth";
++import { listUsers } from "@/lib/users";
++import { SignOutButton } from "./sign-out-button";
+ 
+ export default async function DashboardPage() {
+-  const me = await getCurrentUser();
++  // Unauthenticated requests never reach here — middleware redirects them to /login.
++  const session = await auth();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
+-      <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+-      </p>
++      <div className="flex items-start justify-between gap-4">
++        <div>
++          <h1 className="text-2xl font-semibold">Dashboard</h1>
++          <p className="mt-2 text-sm opacity-70">
++            Signed in as {session?.user?.name ?? "—"} ({session?.user?.email ?? "—"})
++          </p>
++        </div>
++        <SignOutButton />
++      </div>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+diff --git a/src/app/dashboard/sign-out-button.tsx b/src/app/dashboard/sign-out-button.tsx
+new file mode 100644
+index 0000000..60b18d1
+--- /dev/null
++++ b/src/app/dashboard/sign-out-button.tsx
+@@ -0,0 +1,19 @@
++import { signOut } from "@/lib/auth";
++
++export function SignOutButton() {
++  return (
++    <form
++      action={async () => {
++        "use server";
++        await signOut({ redirectTo: "/" });
++      }}
++    >
++      <button
++        type="submit"
++        className="rounded border border-black/15 px-3 py-1.5 text-sm hover:bg-black/[.04] dark:border-white/20 dark:hover:bg-white/[.08]"
++      >
++        Sign out
++      </button>
++    </form>
++  );
++}
+diff --git a/src/app/login/actions.ts b/src/app/login/actions.ts
+new file mode 100644
+index 0000000..1c26bfe
+--- /dev/null
++++ b/src/app/login/actions.ts
+@@ -0,0 +1,25 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { AuthError } from "next-auth";
++import { signIn } from "@/lib/auth";
++
++export async function credentialsSignInAction(formData: FormData) {
++  const email = String(formData.get("email") ?? "").trim().toLowerCase();
++  const password = String(formData.get("password") ?? "");
++  const callbackUrl = String(formData.get("callbackUrl") ?? "/dashboard") || "/dashboard";
++
++  try {
++    await signIn("credentials", { email, password, redirectTo: callbackUrl });
++  } catch (error) {
++    if (error instanceof AuthError) {
++      redirect(`/login?error=${encodeURIComponent("Invalid email or password.")}`);
++    }
++    throw error;
++  }
++}
++
++export async function googleSignInAction(formData: FormData) {
++  const callbackUrl = String(formData.get("callbackUrl") ?? "/dashboard") || "/dashboard";
++  await signIn("google", { redirectTo: callbackUrl });
++}
+diff --git a/src/app/login/page.tsx b/src/app/login/page.tsx
+new file mode 100644
+index 0000000..1d943ad
+--- /dev/null
++++ b/src/app/login/page.tsx
+@@ -0,0 +1,75 @@
++import Link from "next/link";
++import { credentialsSignInAction, googleSignInAction } from "./actions";
++
++export default async function LoginPage({
++  searchParams,
++}: {
++  searchParams: Promise<{ error?: string; callbackUrl?: string }>;
++}) {
++  const { error, callbackUrl } = await searchParams;
++
++  return (
++    <main className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center p-8">
++      <h1 className="text-2xl font-semibold">Sign in</h1>
++
++      {error && (
++        <p className="mt-4 rounded bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
++          {error}
++        </p>
++      )}
++
++      <form action={credentialsSignInAction} className="mt-6 flex flex-col gap-3">
++        <input type="hidden" name="callbackUrl" value={callbackUrl ?? "/dashboard"} />
++        <label className="flex flex-col gap-1 text-sm">
++          Email
++          <input
++            type="email"
++            name="email"
++            required
++            autoComplete="email"
++            className="rounded border border-black/15 px-3 py-2 dark:border-white/20"
++          />
++        </label>
++        <label className="flex flex-col gap-1 text-sm">
++          Password
++          <input
++            type="password"
++            name="password"
++            required
++            autoComplete="current-password"
++            className="rounded border border-black/15 px-3 py-2 dark:border-white/20"
++          />
++        </label>
++        <button
++          type="submit"
++          className="mt-2 rounded bg-foreground px-4 py-2 text-sm font-medium text-background hover:bg-[#383838] dark:hover:bg-[#ccc]"
++        >
++          Sign in
++        </button>
++      </form>
++
++      <div className="my-4 flex items-center gap-3 text-xs uppercase opacity-50">
++        <span className="h-px flex-1 bg-black/10 dark:bg-white/15" />
++        or
++        <span className="h-px flex-1 bg-black/10 dark:bg-white/15" />
++      </div>
++
++      <form action={googleSignInAction}>
++        <input type="hidden" name="callbackUrl" value={callbackUrl ?? "/dashboard"} />
++        <button
++          type="submit"
++          className="w-full rounded border border-black/15 px-4 py-2 text-sm font-medium hover:bg-black/[.04] dark:border-white/20 dark:hover:bg-white/[.08]"
++        >
++          Continue with Google
++        </button>
++      </form>
++
++      <p className="mt-6 text-sm opacity-70">
++        No account?{" "}
++        <Link href="/signup" className="font-medium underline">
++          Sign up
++        </Link>
++      </p>
++    </main>
++  );
++}
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..6d00fe5 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,6 +1,10 @@
+ import Image from "next/image";
++import Link from "next/link";
++import { auth } from "@/lib/auth";
++
++export default async function Home() {
++  const session = await auth();
+ 
+-export default function Home() {
+   return (
+     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
+       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
+@@ -39,29 +43,29 @@ export default function Home() {
+           </p>
+         </div>
+         <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
+-          <a
+-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
+-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-            target="_blank"
+-            rel="noopener noreferrer"
+-          >
+-            <Image
+-              className="dark:invert h-[14px] w-4"
+-              src="/vercel.svg"
+-              alt="Vercel logomark"
+-              width={16}
+-              height={14}
+-            />
+-            Deploy Now
+-          </a>
+-          <a
+-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
+-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-            target="_blank"
+-            rel="noopener noreferrer"
+-          >
+-            Documentation
+-          </a>
++          {session?.user ? (
++            <Link
++              className="flex h-12 w-full items-center justify-center rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
++              href="/dashboard"
++            >
++              Dashboard
++            </Link>
++          ) : (
++            <>
++              <Link
++                className="flex h-12 w-full items-center justify-center rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
++                href="/login"
++              >
++                Sign in
++              </Link>
++              <Link
++                className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
++                href="/signup"
++              >
++                Sign up
++              </Link>
++            </>
++          )}
+         </div>
+       </main>
+     </div>
+diff --git a/src/app/signup/actions.ts b/src/app/signup/actions.ts
+new file mode 100644
+index 0000000..2b3a688
+--- /dev/null
++++ b/src/app/signup/actions.ts
+@@ -0,0 +1,36 @@
++"use server";
++
++import bcrypt from "bcryptjs";
++import { redirect } from "next/navigation";
++import { AuthError } from "next-auth";
++import { getUserByEmail, createUser } from "@/lib/users";
++import { signIn } from "@/lib/auth";
++
++export async function signUpAction(formData: FormData) {
++  const email = String(formData.get("email") ?? "").trim().toLowerCase();
++  const password = String(formData.get("password") ?? "");
++  const name = String(formData.get("name") ?? "").trim();
++
++  if (!email || !email.includes("@")) {
++    redirect(`/signup?error=${encodeURIComponent("Enter a valid email address.")}`);
++  }
++  if (password.length < 8) {
++    redirect(`/signup?error=${encodeURIComponent("Password must be at least 8 characters.")}`);
++  }
++  if (await getUserByEmail(email)) {
++    redirect(`/signup?error=${encodeURIComponent("An account with that email already exists.")}`);
++  }
++
++  const passwordHash = await bcrypt.hash(password, 10);
++  await createUser({ email, name: name || email.split("@")[0], passwordHash });
++
++  try {
++    await signIn("credentials", { email, password, redirectTo: "/dashboard" });
++  } catch (error) {
++    // signIn() throws a special NEXT_REDIRECT "error" on success — let it through.
++    if (error instanceof AuthError) {
++      redirect(`/signup?error=${encodeURIComponent("Account created, but sign-in failed. Try logging in.")}`);
++    }
++    throw error;
++  }
++}
+diff --git a/src/app/signup/page.tsx b/src/app/signup/page.tsx
+new file mode 100644
+index 0000000..10479d1
+--- /dev/null
++++ b/src/app/signup/page.tsx
+@@ -0,0 +1,69 @@
++import Link from "next/link";
++import { signUpAction } from "./actions";
++
++export default async function SignUpPage({
++  searchParams,
++}: {
++  searchParams: Promise<{ error?: string }>;
++}) {
++  const { error } = await searchParams;
++
++  return (
++    <main className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center p-8">
++      <h1 className="text-2xl font-semibold">Create an account</h1>
++
++      {error && (
++        <p className="mt-4 rounded bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
++          {error}
++        </p>
++      )}
++
++      <form action={signUpAction} className="mt-6 flex flex-col gap-3">
++        <label className="flex flex-col gap-1 text-sm">
++          Name
++          <input
++            type="text"
++            name="name"
++            autoComplete="name"
++            className="rounded border border-black/15 px-3 py-2 dark:border-white/20"
++          />
++        </label>
++        <label className="flex flex-col gap-1 text-sm">
++          Email
++          <input
++            type="email"
++            name="email"
++            required
++            autoComplete="email"
++            className="rounded border border-black/15 px-3 py-2 dark:border-white/20"
++          />
++        </label>
++        <label className="flex flex-col gap-1 text-sm">
++          Password
++          <input
++            type="password"
++            name="password"
++            required
++            minLength={8}
++            autoComplete="new-password"
++            className="rounded border border-black/15 px-3 py-2 dark:border-white/20"
++          />
++          <span className="text-xs opacity-60">At least 8 characters.</span>
++        </label>
++        <button
++          type="submit"
++          className="mt-2 rounded bg-foreground px-4 py-2 text-sm font-medium text-background hover:bg-[#383838] dark:hover:bg-[#ccc]"
++        >
++          Sign up
++        </button>
++      </form>
++
++      <p className="mt-6 text-sm opacity-70">
++        Already have an account?{" "}
++        <Link href="/login" className="font-medium underline">
++          Sign in
++        </Link>
++      </p>
++    </main>
++  );
++}
+diff --git a/src/lib/auth.ts b/src/lib/auth.ts
+new file mode 100644
+index 0000000..6a5fca7
+--- /dev/null
++++ b/src/lib/auth.ts
+@@ -0,0 +1,61 @@
++import NextAuth from "next-auth";
++import Credentials from "next-auth/providers/credentials";
++import Google from "next-auth/providers/google";
++import bcrypt from "bcryptjs";
++import { getUserByEmail, createUser } from "@/lib/users";
++
++export const { handlers, signIn, signOut, auth } = NextAuth({
++  providers: [
++    Google,
++    Credentials({
++      credentials: {
++        email: { label: "Email", type: "email" },
++        password: { label: "Password", type: "password" },
++      },
++      async authorize(credentials) {
++        const email = typeof credentials?.email === "string" ? credentials.email : undefined;
++        const password = typeof credentials?.password === "string" ? credentials.password : undefined;
++        if (!email || !password) return null;
++
++        const user = await getUserByEmail(email);
++        if (!user?.passwordHash) return null;
++
++        const valid = await bcrypt.compare(password, user.passwordHash);
++        if (!valid) return null;
++
++        return { id: user.id, email: user.email, name: user.name };
++      },
++    }),
++  ],
++  pages: {
++    signIn: "/login",
++  },
++  session: { strategy: "jwt" },
++  callbacks: {
++    // Google sign-ins don't go through authorize(), so make sure the user
++    // exists in our in-memory store the first time they show up.
++    async signIn({ user, account }) {
++      if (account?.provider === "google" && user.email) {
++        const existing = await getUserByEmail(user.email);
++        if (!existing) {
++          await createUser({ email: user.email, name: user.name ?? user.email.split("@")[0] });
++        }
++      }
++      return true;
++    },
++    async jwt({ token, user }) {
++      const email = user?.email ?? token.email;
++      if (email) {
++        const dbUser = await getUserByEmail(email);
++        if (dbUser) token.id = dbUser.id;
++      }
++      return token;
++    },
++    async session({ session, token }) {
++      if (session.user && typeof token.id === "string") {
++        session.user.id = token.id;
++      }
++      return session;
++    },
++  },
++});
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..6470e94 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -3,6 +3,8 @@ export type User = {
+   email: string;
+   name: string;
+   createdAt: string;
++  // Absent for accounts that only ever signed in via an OAuth provider (e.g. Google).
++  passwordHash?: string;
+ };
+ 
+ const users: User[] = [
+@@ -10,6 +12,8 @@ const users: User[] = [
+   { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+ ];
+ 
++let nextId = users.length + 1;
++
+ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+@@ -18,7 +22,25 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
+-export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++export async function getUserByEmail(email: string): Promise<User | undefined> {
++  const normalized = email.trim().toLowerCase();
++  return users.find((u) => u.email.toLowerCase() === normalized);
++}
++
++// Creates a new user record. `passwordHash` is omitted for OAuth-only sign-ups
++// (the account can still be used to sign in via Google later).
++export async function createUser(input: {
++  email: string;
++  name: string;
++  passwordHash?: string;
++}): Promise<User> {
++  const user: User = {
++    id: String(nextId++),
++    email: input.email.trim().toLowerCase(),
++    name: input.name,
++    createdAt: new Date().toISOString().slice(0, 10),
++    passwordHash: input.passwordHash,
++  };
++  users.push(user);
++  return user;
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..d105796
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,14 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/lib/auth";
++
++export default auth((req) => {
++  if (!req.auth) {
++    const loginUrl = new URL("/login", req.nextUrl.origin);
++    loginUrl.searchParams.set("callbackUrl", req.nextUrl.pathname);
++    return NextResponse.redirect(loginUrl);
++  }
++});
++
++export const config = {
++  matcher: ["/dashboard/:path*"],
++};
+diff --git a/src/types/next-auth.d.ts b/src/types/next-auth.d.ts
+new file mode 100644
+index 0000000..418a036
+--- /dev/null
++++ b/src/types/next-auth.d.ts
+@@ -0,0 +1,15 @@
++import type { DefaultSession } from "next-auth";
++
++declare module "next-auth" {
++  interface Session {
++    user: {
++      id: string;
++    } & DefaultSession["user"];
++  }
++}
++
++declare module "next-auth/jwt" {
++  interface JWT {
++    id?: string;
++  }
++}

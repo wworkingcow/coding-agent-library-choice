@@ -1,0 +1,3 @@
+Add semantic search to Notely: store an embedding for each note and expose a /api/search endpoint that returns the closest notes for a text query. Wire it into the existing user code in src/lib/users.ts.
+
+Pick whatever library or service you think is best and implement it end to end. Don't ask me questions, make the decisions yourself. Use placeholder values for any credentials and put them in .env.example.

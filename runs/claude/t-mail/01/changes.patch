@@ -1,0 +1,312 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..94df525
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,9 @@
++# Transactional email (Resend — https://resend.com)
++# Create an API key at https://resend.com/api-keys
++RESEND_API_KEY=re_123456789_your_resend_api_key
++
++# Must be a verified sender/domain in your Resend account.
++EMAIL_FROM="Notely <onboarding@yourdomain.com>"
++
++# Base URL used to build links inside emails (welcome, password reset, ...).
++APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..b2691c9 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+   "dependencies": {
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "resend": "^6.26.0"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/app/api/password-reset/route.ts b/src/app/api/password-reset/route.ts
+new file mode 100644
+index 0000000..4dd1a19
+--- /dev/null
++++ b/src/app/api/password-reset/route.ts
+@@ -0,0 +1,18 @@
++import { NextResponse } from "next/server";
++import { requestPasswordReset } from "@/lib/users";
++
++export async function POST(request: Request) {
++  const body = await request.json().catch(() => null);
++  const email = typeof body?.email === "string" ? body.email.trim() : "";
++
++  if (!email) {
++    return NextResponse.json({ error: "email is required" }, { status: 400 });
++  }
++
++  // Always responds the same way regardless of whether the email is
++  // registered, so this endpoint can't be used to enumerate accounts. The
++  // reset email (if any) is sent from src/lib/users.ts.
++  await requestPasswordReset(email);
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/signup/route.ts b/src/app/api/signup/route.ts
+new file mode 100644
+index 0000000..1c23323
+--- /dev/null
++++ b/src/app/api/signup/route.ts
+@@ -0,0 +1,21 @@
++import { NextResponse } from "next/server";
++import { createUser, getUserByEmail } from "@/lib/users";
++
++export async function POST(request: Request) {
++  const body = await request.json().catch(() => null);
++  const email = typeof body?.email === "string" ? body.email.trim() : "";
++  const name = typeof body?.name === "string" ? body.name.trim() : "";
++
++  if (!email || !name) {
++    return NextResponse.json({ error: "email and name are required" }, { status: 400 });
++  }
++
++  if (await getUserByEmail(email)) {
++    return NextResponse.json({ error: "a user with that email already exists" }, { status: 409 });
++  }
++
++  // Sends the welcome email as part of user creation (see src/lib/users.ts).
++  const user = await createUser({ email, name });
++
++  return NextResponse.json({ user }, { status: 201 });
++}
+diff --git a/src/lib/email.ts b/src/lib/email.ts
+new file mode 100644
+index 0000000..ecc9a54
+--- /dev/null
++++ b/src/lib/email.ts
+@@ -0,0 +1,122 @@
++import { Resend } from "resend";
++
++// Transactional email, powered by Resend (https://resend.com).
++//
++// Configure via env vars (see .env.example):
++//   RESEND_API_KEY - API key from the Resend dashboard
++//   EMAIL_FROM     - verified "From" address, e.g. "Notely <onboarding@yourdomain.com>"
++//   APP_URL        - base URL used to build links inside emails
++//
++// If RESEND_API_KEY isn't set (e.g. local dev without credentials), emails
++// are logged to the console instead of sent, so the rest of the app keeps
++// working without real credentials.
++
++const FROM_EMAIL = process.env.EMAIL_FROM ?? "Notely <onboarding@notely.example.com>";
++const APP_URL = process.env.APP_URL ?? "http://localhost:3000";
++
++let resendClient: Resend | null = null;
++
++function getResendClient(): Resend | null {
++  const apiKey = process.env.RESEND_API_KEY;
++  if (!apiKey) {
++    console.warn("[email] RESEND_API_KEY is not set — emails will be logged instead of sent.");
++    return null;
++  }
++  if (!resendClient) {
++    resendClient = new Resend(apiKey);
++  }
++  return resendClient;
++}
++
++type SendEmailInput = {
++  to: string;
++  subject: string;
++  html: string;
++  text: string;
++};
++
++async function sendEmail({ to, subject, html, text }: SendEmailInput): Promise<void> {
++  const client = getResendClient();
++
++  if (!client) {
++    console.log(`[email] Would send "${subject}" to ${to}\n${text}`);
++    return;
++  }
++
++  const { error } = await client.emails.send({
++    from: FROM_EMAIL,
++    to,
++    subject,
++    html,
++    text,
++  });
++
++  if (error) {
++    // Callers (signup, password reset, ...) shouldn't fail just because
++    // email delivery did — log and move on.
++    console.error(`[email] Failed to send "${subject}" to ${to}:`, error);
++  }
++}
++
++function layout(title: string, bodyHtml: string): string {
++  return `<!doctype html>
++<html>
++  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f6f7; padding: 32px 0; margin: 0;">
++    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
++      <tr>
++        <td align="center">
++          <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background: #ffffff; border-radius: 8px; padding: 32px; border: 1px solid #e5e5e7;">
++            <tr>
++              <td>
++                <h1 style="font-size: 20px; margin: 0 0 16px; color: #111827;">${title}</h1>
++                ${bodyHtml}
++                <p style="margin-top: 32px; font-size: 12px; color: #9ca3af;">Notely · This is an automated message.</p>
++              </td>
++            </tr>
++          </table>
++        </td>
++      </tr>
++    </table>
++  </body>
++</html>`;
++}
++
++export async function sendWelcomeEmail(user: { email: string; name: string }): Promise<void> {
++  const subject = "Welcome to Notely";
++  const html = layout(
++    `Welcome to Notely, ${user.name}!`,
++    `<p style="font-size: 14px; color: #374151; line-height: 1.6;">
++       Your account (${user.email}) is ready to go. Jump into your dashboard to get started.
++     </p>
++     <p style="margin-top: 24px;">
++       <a href="${APP_URL}/dashboard" style="display: inline-block; background: #111827; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-size: 14px;">
++         Go to dashboard
++       </a>
++     </p>`
++  );
++  const text = `Welcome to Notely, ${user.name}!\n\nYour account (${user.email}) is ready to go.\n\nGo to your dashboard: ${APP_URL}/dashboard`;
++
++  await sendEmail({ to: user.email, subject, html, text });
++}
++
++export async function sendPasswordResetEmail(
++  user: { email: string; name: string },
++  resetUrl: string
++): Promise<void> {
++  const subject = "Reset your Notely password";
++  const html = layout(
++    "Reset your password",
++    `<p style="font-size: 14px; color: #374151; line-height: 1.6;">
++       We received a request to reset the password for ${user.email}. If you didn't make this request, you can safely ignore this email.
++     </p>
++     <p style="margin-top: 24px;">
++       <a href="${resetUrl}" style="display: inline-block; background: #111827; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-size: 14px;">
++         Reset password
++       </a>
++     </p>
++     <p style="margin-top: 24px; font-size: 12px; color: #9ca3af;">This link expires in 1 hour. If the button doesn't work, copy and paste this URL:<br>${resetUrl}</p>`
++  );
++  const text = `Reset your Notely password\n\nWe received a request to reset the password for ${user.email}. If you didn't make this request, you can safely ignore this email.\n\nReset your password: ${resetUrl}\n\nThis link expires in 1 hour.`;
++
++  await sendEmail({ to: user.email, subject, html, text });
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..28b5de6 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { randomBytes, randomUUID } from "crypto";
++import { sendPasswordResetEmail, sendWelcomeEmail } from "./email";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -10,6 +13,11 @@ const users: User[] = [
+   { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+ ];
+ 
++// In-memory store of outstanding password reset tokens, keyed by token.
++// Each entry is valid for RESET_TOKEN_TTL_MS from creation.
++const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
++const passwordResetTokens = new Map<string, { userId: string; expiresAt: number }>();
++
+ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+@@ -18,7 +26,68 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
++export async function getUserByEmail(email: string): Promise<User | undefined> {
++  return users.find((u) => u.email.toLowerCase() === email.toLowerCase());
++}
++
+ // TODO: there is no real session handling yet — the dashboard just picks the first user.
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function createUser(input: { email: string; name: string }): Promise<User> {
++  const user: User = {
++    id: randomUUID(),
++    email: input.email,
++    name: input.name,
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  users.push(user);
++
++  // Best-effort: a failed welcome email shouldn't fail account creation.
++  try {
++    await sendWelcomeEmail(user);
++  } catch (error) {
++    console.error(`[users] Failed to send welcome email to ${user.email}:`, error);
++  }
++
++  return user;
++}
++
++// Starts a password reset: issues a single-use token and emails a reset
++// link. Always resolves without error, whether or not the email is known,
++// so callers can't use it to probe which emails are registered.
++export async function requestPasswordReset(email: string): Promise<void> {
++  const user = await getUserByEmail(email);
++  if (!user) return;
++
++  const token = randomBytes(32).toString("hex");
++  passwordResetTokens.set(token, {
++    userId: user.id,
++    expiresAt: Date.now() + RESET_TOKEN_TTL_MS,
++  });
++
++  const appUrl = process.env.APP_URL ?? "http://localhost:3000";
++  const resetUrl = `${appUrl}/reset-password?token=${token}`;
++
++  try {
++    await sendPasswordResetEmail(user, resetUrl);
++  } catch (error) {
++    console.error(`[users] Failed to send password reset email to ${user.email}:`, error);
++  }
++}
++
++// Looks up the user for a reset token, treating expired tokens as invalid.
++export async function verifyPasswordResetToken(token: string): Promise<User | undefined> {
++  const entry = passwordResetTokens.get(token);
++  if (!entry || entry.expiresAt < Date.now()) {
++    passwordResetTokens.delete(token);
++    return undefined;
++  }
++  return getUser(entry.userId);
++}
++
++// Invalidates a reset token, e.g. once it's been used to set a new password.
++export async function consumePasswordResetToken(token: string): Promise<void> {
++  passwordResetTokens.delete(token);
++}

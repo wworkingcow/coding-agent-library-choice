@@ -1,0 +1,373 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..89f281b
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,6 @@
++# Used by src/lib/embeddings.ts for semantic search (/api/search).
++# Get a real key at https://platform.openai.com/api-keys
++OPENAI_API_KEY=sk-placeholder
++
++# Optional: override the embeddings model (defaults to text-embedding-3-small).
++OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/src/app/api/search/route.ts b/src/app/api/search/route.ts
+new file mode 100644
+index 0000000..9876203
+--- /dev/null
++++ b/src/app/api/search/route.ts
+@@ -0,0 +1,83 @@
++import { NextRequest, NextResponse } from "next/server";
++
++import { EmbeddingError } from "@/lib/embeddings";
++import { searchNotes } from "@/lib/search";
++import { getCurrentUser } from "@/lib/users";
++
++const DEFAULT_LIMIT = 5;
++const MAX_LIMIT = 20;
++
++function parseLimit(raw: string | null): number {
++  if (!raw) return DEFAULT_LIMIT;
++  const n = Number(raw);
++  if (!Number.isFinite(n) || n <= 0) return DEFAULT_LIMIT;
++  return Math.min(Math.floor(n), MAX_LIMIT);
++}
++
++/**
++ * GET /api/search?q=<text>&limit=<n>&scope=mine|all
++ *
++ * Semantic search over notes. Scoped to the current user (per the existing,
++ * session-less src/lib/users.ts#getCurrentUser) by default; pass
++ * scope=all to search every user's notes.
++ */
++export async function GET(req: NextRequest) {
++  const { searchParams } = req.nextUrl;
++  const query = searchParams.get("q") ?? "";
++  const limit = parseLimit(searchParams.get("limit"));
++  const scope = searchParams.get("scope") === "all" ? "all" : "mine";
++
++  return runSearch(query, limit, scope);
++}
++
++/** POST /api/search { "query": "text", "limit": 5, "scope": "mine" | "all" } */
++export async function POST(req: NextRequest) {
++  let body: { query?: string; limit?: number; scope?: string };
++  try {
++    body = await req.json();
++  } catch {
++    return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
++  }
++
++  const query = body.query ?? "";
++  const limit = parseLimit(body.limit != null ? String(body.limit) : null);
++  const scope = body.scope === "all" ? "all" : "mine";
++
++  return runSearch(query, limit, scope);
++}
++
++async function runSearch(query: string, limit: number, scope: "mine" | "all") {
++  if (!query.trim()) {
++    return NextResponse.json({ error: "Query parameter 'q' (or 'query') is required." }, { status: 400 });
++  }
++
++  const me = await getCurrentUser();
++  if (scope === "mine" && !me) {
++    return NextResponse.json({ error: "No current user." }, { status: 401 });
++  }
++
++  try {
++    const results = await searchNotes(query, {
++      userId: scope === "mine" ? me?.id : undefined,
++      limit,
++    });
++
++    return NextResponse.json({
++      query,
++      scope,
++      results: results.map(({ note, ownerName, score }) => ({
++        id: note.id,
++        title: note.title,
++        content: note.content,
++        createdAt: note.createdAt,
++        owner: ownerName ?? null,
++        score,
++      })),
++    });
++  } catch (err) {
++    if (err instanceof EmbeddingError) {
++      return NextResponse.json({ error: err.message }, { status: 503 });
++    }
++    throw err;
++  }
++}
+diff --git a/src/lib/embeddings.ts b/src/lib/embeddings.ts
+new file mode 100644
+index 0000000..35ffcd5
+--- /dev/null
++++ b/src/lib/embeddings.ts
+@@ -0,0 +1,80 @@
++// Thin client for OpenAI's embeddings API. We call the REST endpoint
++// directly with fetch rather than pulling in the `openai` SDK — one HTTP
++// call doesn't need a dependency.
++//
++// Model choice: text-embedding-3-small. It's inexpensive, fast, and more
++// than accurate enough for searching a personal notes app (1536 dims,
++// can be down-projected via `dimensions` if storage ever becomes a
++// concern — not needed at this scale).
++
++const OPENAI_API_URL = "https://api.openai.com/v1/embeddings";
++const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small";
++
++export class EmbeddingError extends Error {}
++
++/**
++ * Embeds a single string of text and returns its vector.
++ * Throws EmbeddingError if OPENAI_API_KEY isn't configured or the API call fails.
++ */
++export async function embedText(text: string): Promise<number[]> {
++  const [vector] = await embedTexts([text]);
++  return vector;
++}
++
++/**
++ * Embeds a batch of strings in one API call (OpenAI supports batched inputs,
++ * which is both cheaper and faster than one request per note).
++ */
++export async function embedTexts(texts: string[]): Promise<number[][]> {
++  const apiKey = process.env.OPENAI_API_KEY;
++  if (!apiKey) {
++    throw new EmbeddingError(
++      "OPENAI_API_KEY is not set. Copy .env.example to .env.local and fill in a real key."
++    );
++  }
++  if (texts.length === 0) return [];
++
++  const res = await fetch(OPENAI_API_URL, {
++    method: "POST",
++    headers: {
++      "Content-Type": "application/json",
++      Authorization: `Bearer ${apiKey}`,
++    },
++    body: JSON.stringify({
++      model: EMBEDDING_MODEL,
++      input: texts,
++    }),
++  });
++
++  if (!res.ok) {
++    const body = await res.text().catch(() => "");
++    throw new EmbeddingError(
++      `OpenAI embeddings request failed (${res.status} ${res.statusText}): ${body}`
++    );
++  }
++
++  const json = (await res.json()) as {
++    data: { embedding: number[]; index: number }[];
++  };
++
++  return json.data
++    .sort((a, b) => a.index - b.index)
++    .map((d) => d.embedding);
++}
++
++/** Cosine similarity between two equal-length vectors, in [-1, 1]. */
++export function cosineSimilarity(a: number[], b: number[]): number {
++  if (a.length !== b.length) {
++    throw new Error(`Vector length mismatch: ${a.length} vs ${b.length}`);
++  }
++  let dot = 0;
++  let normA = 0;
++  let normB = 0;
++  for (let i = 0; i < a.length; i++) {
++    dot += a[i] * b[i];
++    normA += a[i] * a[i];
++    normB += b[i] * b[i];
++  }
++  if (normA === 0 || normB === 0) return 0;
++  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
++}
+diff --git a/src/lib/notes.ts b/src/lib/notes.ts
+new file mode 100644
+index 0000000..ee28efb
+--- /dev/null
++++ b/src/lib/notes.ts
+@@ -0,0 +1,110 @@
++import { embedText, EmbeddingError } from "@/lib/embeddings";
++import { listUsers, type User } from "@/lib/users";
++
++export type Note = {
++  id: string;
++  userId: User["id"];
++  title: string;
++  content: string;
++  createdAt: string;
++  /** Semantic embedding of `${title}\n${content}`, lazily populated. */
++  embedding?: number[];
++};
++
++// In-memory store, matching the pattern used for users in src/lib/users.ts.
++// Seeded with a couple of notes per user so /api/search has something to
++// find out of the box.
++const notes: Note[] = [
++  {
++    id: "n1",
++    userId: "1",
++    title: "Grocery list",
++    content: "Eggs, oat milk, spinach, coffee beans, sourdough bread.",
++    createdAt: "2026-01-05",
++  },
++  {
++    id: "n2",
++    userId: "1",
++    title: "Sprint planning notes",
++    content:
++      "Discussed splitting the search feature into indexing and query work. Ada to pair with Grace on the ranking function.",
++    createdAt: "2026-01-20",
++  },
++  {
++    id: "n3",
++    userId: "1",
++    title: "Book recommendations",
++    content:
++      "Grace suggested a couple of sci-fi novels about generation ships and slow interstellar travel.",
++    createdAt: "2026-02-02",
++  },
++  {
++    id: "n4",
++    userId: "2",
++    title: "Trip itinerary",
++    content:
++      "Flight lands Friday morning, train to the coast Saturday, hiking Sunday before heading back.",
++    createdAt: "2026-02-14",
++  },
++  {
++    id: "n5",
++    userId: "2",
++    title: "Debugging journal",
++    content:
++      "Tracked a memory leak to an event listener that never got removed on unmount. Fixed with an AbortController.",
++    createdAt: "2026-02-20",
++  },
++];
++
++function textForEmbedding(note: Pick<Note, "title" | "content">): string {
++  return `${note.title}\n\n${note.content}`;
++}
++
++export async function listNotes(userId?: string): Promise<Note[]> {
++  return userId ? notes.filter((n) => n.userId === userId) : notes;
++}
++
++export async function getNote(id: string): Promise<Note | undefined> {
++  return notes.find((n) => n.id === id);
++}
++
++export async function createNote(
++  userId: string,
++  title: string,
++  content: string
++): Promise<Note> {
++  const note: Note = {
++    id: `n${notes.length + 1}`,
++    userId,
++    title,
++    content,
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  notes.push(note);
++  // Best-effort: compute the embedding up front so it's ready for search
++  // immediately. If embedding fails (e.g. no API key configured), the note
++  // is still saved — ensureEmbedding() will retry lazily on next search.
++  try {
++    note.embedding = await embedText(textForEmbedding(note));
++  } catch (err) {
++    if (!(err instanceof EmbeddingError)) throw err;
++  }
++  return note;
++}
++
++/** Computes and caches the note's embedding if it isn't already stored. */
++export async function ensureEmbedding(note: Note): Promise<number[]> {
++  if (!note.embedding) {
++    note.embedding = await embedText(textForEmbedding(note));
++  }
++  return note.embedding;
++}
++
++/**
++ * Wires notes up to the existing user directory: resolves the display name
++ * for whoever owns a note, for use in search results.
++ */
++export async function noteOwnerName(note: Note): Promise<string | undefined> {
++  const users = await listUsers();
++  return users.find((u) => u.id === note.userId)?.name;
++}
+diff --git a/src/lib/search.ts b/src/lib/search.ts
+new file mode 100644
+index 0000000..7f1efd6
+--- /dev/null
++++ b/src/lib/search.ts
+@@ -0,0 +1,52 @@
++import { cosineSimilarity, embedText } from "@/lib/embeddings";
++import { ensureEmbedding, listNotes, noteOwnerName, type Note } from "@/lib/notes";
++
++export type SearchResult = {
++  note: Note;
++  ownerName: string | undefined;
++  score: number;
++};
++
++export type SearchOptions = {
++  /** Restrict results to one user's notes. Omit to search across all users. */
++  userId?: string;
++  /** Max number of results to return. Defaults to 5. */
++  limit?: number;
++};
++
++/**
++ * Semantic search over notes: embeds the query, compares it against each
++ * note's (lazily-computed, cached) embedding via cosine similarity, and
++ * returns the closest matches, best first.
++ */
++export async function searchNotes(
++  query: string,
++  { userId, limit = 5 }: SearchOptions = {}
++): Promise<SearchResult[]> {
++  const trimmed = query.trim();
++  if (!trimmed) return [];
++
++  const candidates = await listNotes(userId);
++  if (candidates.length === 0) return [];
++
++  const [queryEmbedding, noteEmbeddings] = await Promise.all([
++    embedText(trimmed),
++    Promise.all(candidates.map((note) => ensureEmbedding(note))),
++  ]);
++
++  const scored = candidates.map((note, i) => ({
++    note,
++    score: cosineSimilarity(queryEmbedding, noteEmbeddings[i]),
++  }));
++
++  scored.sort((a, b) => b.score - a.score);
++
++  const top = scored.slice(0, limit);
++  return Promise.all(
++    top.map(async ({ note, score }) => ({
++      note,
++      ownerName: await noteOwnerName(note),
++      score,
++    }))
++  );
++}

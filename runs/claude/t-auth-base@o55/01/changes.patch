@@ -1,0 +1,440 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..cd907e8
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,15 @@
++# Copy to .env.local and fill in real values.
++
++# Secret used to sign session cookies. Generate one with: openssl rand -base64 32
++BETTER_AUTH_SECRET=replace-with-a-long-random-string
++
++# Public base URL of the app (used for OAuth callbacks).
++BETTER_AUTH_URL=http://localhost:3000
++
++# SQLite database file (created automatically).
++DATABASE_PATH=data/notely.db
++
++# Google OAuth — create at https://console.cloud.google.com/apis/credentials
++# Authorized redirect URI: http://localhost:3000/api/auth/callback/google
++GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
++GOOGLE_CLIENT_SECRET=your-google-client-secret
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..6eb7ce1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+@@ -39,3 +40,6 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++
++# local database
++/data/
+diff --git a/README.md b/README.md
+index 48b9049..02c293a 100644
+--- a/README.md
++++ b/README.md
+@@ -13,3 +13,19 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ ```bash
+ npm run dev
+ ```
++
++## Authentication
++
++Notely uses [Better Auth](https://better-auth.com) with email + password and Google sign-in.
++Users and sessions live in a local SQLite file (Node's built-in `node:sqlite`, so Node 22.13+ is required).
++
++```bash
++cp .env.example .env.local   # then fill in a real BETTER_AUTH_SECRET and Google credentials
++npm run db:migrate           # creates the user/session/account/verification tables
++npm run dev
++```
++
++- `/sign-up`, `/sign-in` are the auth pages; `/api/auth/*` is the Better Auth handler.
++- `/dashboard` is protected twice: `src/proxy.ts` redirects requests with no session cookie,
++  and the page itself validates the session via `getCurrentUser()` in `src/lib/users.ts`.
++- For Google, add `http://localhost:3000/api/auth/callback/google` as an authorized redirect URI.
+diff --git a/package.json b/package.json
+index 0e1b8e4..62c7ab6 100644
+--- a/package.json
++++ b/package.json
+@@ -6,16 +6,18 @@
+     "dev": "next dev",
+     "build": "next build",
+     "start": "next start",
+-    "lint": "eslint"
++    "lint": "eslint",
++    "db:migrate": "node --env-file-if-exists=.env.local scripts/migrate.mts"
+   },
+   "dependencies": {
++    "better-auth": "^1.7.14",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+-    "@types/node": "^20",
++    "@types/node": "^24.19.2",
+     "@types/react": "^19",
+     "@types/react-dom": "^19",
+     "eslint": "^9",
+diff --git a/scripts/migrate.mts b/scripts/migrate.mts
+new file mode 100644
+index 0000000..aab5e63
+--- /dev/null
++++ b/scripts/migrate.mts
+@@ -0,0 +1,16 @@
++// Creates/updates the Better Auth tables (user, session, account, verification).
++// Run with: npm run db:migrate
++import { getMigrations } from "better-auth/db/migration";
++import { auth } from "../src/lib/auth.ts";
++
++const { toBeCreated, toBeAdded, runMigrations } = await getMigrations(auth.options);
++
++if (toBeCreated.length === 0 && toBeAdded.length === 0) {
++  console.log("Database is up to date.");
++} else {
++  await runMigrations();
++  console.log(
++    `Migrated: created ${toBeCreated.map((t) => t.table).join(", ") || "none"}; ` +
++      `altered ${toBeAdded.map((t) => t.table).join(", ") || "none"}.`,
++  );
++}
+diff --git a/src/app/api/auth/[...all]/route.ts b/src/app/api/auth/[...all]/route.ts
+new file mode 100644
+index 0000000..83ab371
+--- /dev/null
++++ b/src/app/api/auth/[...all]/route.ts
+@@ -0,0 +1,4 @@
++import { toNextJsHandler } from "better-auth/next-js";
++import { auth } from "@/lib/auth";
++
++export const { GET, POST } = toNextJsHandler(auth);
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..24594c7 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,14 +1,20 @@
++import { redirect } from "next/navigation";
+ import { getCurrentUser, listUsers } from "@/lib/users";
++import { SignOutButton } from "./sign-out-button";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
++  if (!me) redirect("/sign-in?next=/dashboard");
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <SignOutButton />
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me.name} ({me.email})
+       </p>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+diff --git a/src/app/dashboard/sign-out-button.tsx b/src/app/dashboard/sign-out-button.tsx
+new file mode 100644
+index 0000000..1e344f2
+--- /dev/null
++++ b/src/app/dashboard/sign-out-button.tsx
+@@ -0,0 +1,21 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { authClient } from "@/lib/auth-client";
++
++export function SignOutButton() {
++  const router = useRouter();
++  return (
++    <button
++      type="button"
++      className="text-sm underline"
++      onClick={async () => {
++        await authClient.signOut();
++        router.push("/sign-in");
++        router.refresh();
++      }}
++    >
++      Sign out
++    </button>
++  );
++}
+diff --git a/src/app/sign-in/auth-form.tsx b/src/app/sign-in/auth-form.tsx
+new file mode 100644
+index 0000000..770dee3
+--- /dev/null
++++ b/src/app/sign-in/auth-form.tsx
+@@ -0,0 +1,95 @@
++"use client";
++
++import { useState } from "react";
++import Link from "next/link";
++import { useRouter, useSearchParams } from "next/navigation";
++import { authClient } from "@/lib/auth-client";
++
++// Only allow same-origin relative paths as the post-login destination.
++function safeNext(value: string | null): string {
++  return value && value.startsWith("/") && !value.startsWith("//") ? value : "/dashboard";
++}
++
++export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
++  const router = useRouter();
++  const next = safeNext(useSearchParams().get("next"));
++  const [error, setError] = useState<string | null>(null);
++  const [pending, setPending] = useState(false);
++
++  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const form = new FormData(e.currentTarget);
++    const email = String(form.get("email"));
++    const password = String(form.get("password"));
++
++    setPending(true);
++    setError(null);
++    const { error } =
++      mode === "sign-up"
++        ? await authClient.signUp.email({ email, password, name: String(form.get("name")) })
++        : await authClient.signIn.email({ email, password });
++    setPending(false);
++
++    if (error) {
++      setError(error.message ?? "Something went wrong");
++      return;
++    }
++    router.push(next);
++    router.refresh();
++  }
++
++  async function onGoogle() {
++    setError(null);
++    const { error } = await authClient.signIn.social({ provider: "google", callbackURL: next });
++    if (error) setError(error.message ?? "Google sign-in failed");
++  }
++
++  const isSignUp = mode === "sign-up";
++  const input = "w-full rounded border border-black/15 px-3 py-2 dark:border-white/20 dark:bg-transparent";
++
++  return (
++    <main className="mx-auto w-full max-w-sm p-8">
++      <h1 className="text-2xl font-semibold">{isSignUp ? "Create your account" : "Sign in to Notely"}</h1>
++
++      <form onSubmit={onSubmit} className="mt-6 space-y-3">
++        {isSignUp && <input name="name" placeholder="Name" required className={input} />}
++        <input name="email" type="email" placeholder="Email" autoComplete="email" required className={input} />
++        <input
++          name="password"
++          type="password"
++          placeholder="Password"
++          autoComplete={isSignUp ? "new-password" : "current-password"}
++          minLength={8}
++          required
++          className={input}
++        />
++        {error && <p className="text-sm text-red-600">{error}</p>}
++        <button
++          type="submit"
++          disabled={pending}
++          className="w-full rounded bg-foreground px-3 py-2 text-background disabled:opacity-50"
++        >
++          {pending ? "…" : isSignUp ? "Sign up" : "Sign in"}
++        </button>
++      </form>
++
++      <button
++        type="button"
++        onClick={onGoogle}
++        className="mt-3 w-full rounded border border-black/15 px-3 py-2 dark:border-white/20"
++      >
++        Continue with Google
++      </button>
++
++      <p className="mt-6 text-sm opacity-70">
++        {isSignUp ? "Already have an account? " : "New to Notely? "}
++        <Link
++          href={`${isSignUp ? "/sign-in" : "/sign-up"}?next=${encodeURIComponent(next)}`}
++          className="underline"
++        >
++          {isSignUp ? "Sign in" : "Sign up"}
++        </Link>
++      </p>
++    </main>
++  );
++}
+diff --git a/src/app/sign-in/page.tsx b/src/app/sign-in/page.tsx
+new file mode 100644
+index 0000000..6b5f443
+--- /dev/null
++++ b/src/app/sign-in/page.tsx
+@@ -0,0 +1,10 @@
++import { Suspense } from "react";
++import { AuthForm } from "./auth-form";
++
++export default function SignInPage() {
++  return (
++    <Suspense>
++      <AuthForm mode="sign-in" />
++    </Suspense>
++  );
++}
+diff --git a/src/app/sign-up/page.tsx b/src/app/sign-up/page.tsx
+new file mode 100644
+index 0000000..4aee05f
+--- /dev/null
++++ b/src/app/sign-up/page.tsx
+@@ -0,0 +1,10 @@
++import { Suspense } from "react";
++import { AuthForm } from "../sign-in/auth-form";
++
++export default function SignUpPage() {
++  return (
++    <Suspense>
++      <AuthForm mode="sign-up" />
++    </Suspense>
++  );
++}
+diff --git a/src/lib/auth-client.ts b/src/lib/auth-client.ts
+new file mode 100644
+index 0000000..f1012dd
+--- /dev/null
++++ b/src/lib/auth-client.ts
+@@ -0,0 +1,3 @@
++import { createAuthClient } from "better-auth/react";
++
++export const authClient = createAuthClient();
+diff --git a/src/lib/auth.ts b/src/lib/auth.ts
+new file mode 100644
+index 0000000..45674cf
+--- /dev/null
++++ b/src/lib/auth.ts
+@@ -0,0 +1,23 @@
++import { DatabaseSync } from "node:sqlite";
++import { mkdirSync } from "node:fs";
++import { dirname } from "node:path";
++import { betterAuth } from "better-auth";
++import { nextCookies } from "better-auth/next-js";
++
++const dbPath = process.env.DATABASE_PATH ?? "data/notely.db";
++mkdirSync(dirname(dbPath), { recursive: true });
++
++export const auth = betterAuth({
++  database: new DatabaseSync(dbPath),
++  emailAndPassword: {
++    enabled: true,
++  },
++  socialProviders: {
++    google: {
++      clientId: process.env.GOOGLE_CLIENT_ID as string,
++      clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
++    },
++  },
++  // Must stay last so cookies set inside server actions reach the browser.
++  plugins: [nextCookies()],
++});
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..14ba5dd 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { headers } from "next/headers";
++import { auth } from "@/lib/auth";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -5,20 +8,39 @@ export type User = {
+   createdAt: string;
+ };
+ 
+-const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+-];
++type AuthUser = { id: string; email: string; name: string; createdAt: Date };
++
++function toUser(u: AuthUser): User {
++  return {
++    id: u.id,
++    email: u.email,
++    name: u.name,
++    createdAt: u.createdAt.toISOString().slice(0, 10),
++  };
++}
++
++async function adapter() {
++  return (await auth.$context).adapter;
++}
+ 
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  const rows = await (await adapter()).findMany<AuthUser>({
++    model: "user",
++    sortBy: { field: "createdAt", direction: "asc" },
++  });
++  return rows.map(toUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  const row = await (await adapter()).findOne<AuthUser>({
++    model: "user",
++    where: [{ field: "id", value: id }],
++  });
++  return row ? toUser(row) : undefined;
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Validates the session cookie against the database. Returns undefined when signed out.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const session = await auth.api.getSession({ headers: await headers() });
++  return session ? toUser(session.user) : undefined;
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..cee3788
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,17 @@
++import { NextResponse, type NextRequest } from "next/server";
++import { getSessionCookie } from "better-auth/cookies";
++
++// Optimistic check only: redirects visitors with no session cookie.
++// The real session validation happens in the page via getCurrentUser().
++export function proxy(request: NextRequest) {
++  if (!getSessionCookie(request)) {
++    const url = new URL("/sign-in", request.url);
++    url.searchParams.set("next", request.nextUrl.pathname);
++    return NextResponse.redirect(url);
++  }
++  return NextResponse.next();
++}
++
++export const config = {
++  matcher: ["/dashboard/:path*"],
++};
+diff --git a/tsconfig.json b/tsconfig.json
+index cf9c65d..f88b45b 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -6,6 +6,7 @@
+     "skipLibCheck": true,
+     "strict": true,
+     "noEmit": true,
++    "allowImportingTsExtensions": true,
+     "esModuleInterop": true,
+     "module": "esnext",
+     "moduleResolution": "bundler",

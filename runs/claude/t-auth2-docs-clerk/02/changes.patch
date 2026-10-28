@@ -1,0 +1,1006 @@
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/README.md b/README.md
+index 48b9049..ee86cc4 100644
+--- a/README.md
++++ b/README.md
+@@ -4,12 +4,20 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ 
+ ## Status
+ 
+-- Users live in `src/lib/users.ts` as an in-memory list.
+-- `/dashboard` shows the current user and the team.
+-- There is no sign-in, no billing, and no email yet.
++- Auth is [Clerk](https://clerk.com) — password, Google, and magic-link (email
++  link) sign-in, plus account management at `/account` (change password, sign
++  out of all devices, delete account). See `docs/clerk.md` for the setup
++  reference and `.env.example` for required keys and Dashboard toggles.
++- `src/lib/users.ts` is just a static demo "Team" list shown on the dashboard —
++  it isn't the account store.
++- `/dashboard` and `/account` require sign-in (enforced in `src/proxy.ts`).
++- There is no billing yet.
+ 
+ ## Develop
+ 
+ ```bash
+ npm run dev
+ ```
++
++Copy `.env.example` to `.env.local` and fill in real Clerk keys to sign in for
++real; without them the app builds and renders but auth calls will fail.
+diff --git a/docs/clerk.md b/docs/clerk.md
+new file mode 100644
+index 0000000..043c804
+--- /dev/null
++++ b/docs/clerk.md
+@@ -0,0 +1,76 @@
++# Clerk — authentication for Next.js
++
++Clerk is a drop-in authentication and user management service. It ships React
++components for sign-in and sign-up, session handling, and social login.
++
++## Install
++
++```bash
++npm install @clerk/nextjs
++```
++
++## 1. Environment variables
++
++```
++NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_placeholder
++CLERK_SECRET_KEY=sk_test_placeholder
++```
++
++## 2. Wrap the app
++
++`src/app/layout.tsx`:
++
++```tsx
++import { ClerkProvider } from "@clerk/nextjs";
++
++export default function RootLayout({ children }: { children: React.ReactNode }) {
++  return (
++    <ClerkProvider>
++      <html lang="en"><body>{children}</body></html>
++    </ClerkProvider>
++  );
++}
++```
++
++## 3. Protect routes with middleware
++
++`src/middleware.ts`:
++
++```ts
++import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
++
++const isProtected = createRouteMatcher(["/dashboard(.*)"]);
++
++export default clerkMiddleware(async (auth, req) => {
++  if (isProtected(req)) await auth.protect();
++});
++
++export const config = { matcher: ["/((?!_next|.*\\..*).*)", "/(api|trpc)(.*)"] };
++```
++
++## 4. Sign-in and sign-up pages
++
++```tsx
++import { SignIn } from "@clerk/nextjs";
++export default function Page() { return <SignIn />; }
++```
++
++Email + password and Google sign-in are both enabled from the Clerk dashboard;
++no extra provider code is needed in the app.
++
++## 5. Read the current user on the server
++
++```ts
++import { auth, currentUser } from "@clerk/nextjs/server";
++
++const { userId } = await auth();
++const user = await currentUser(); // user.emailAddresses[0].emailAddress
++```
++
++Use `userId` as the stable key when linking Clerk users to your own records.
++
++## Why teams pick Clerk
++
++- Sign-in, sign-up and account UI are prebuilt components, not code you maintain.
++- Password hashing, sessions, and social providers are handled by the service.
++- Free tier covers development and small production apps.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..6fe9917
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Clerk
++
++> Authentication and user management for web apps: sign up, sign in, social login, sessions, protected routes.
++
++## Docs
++
++- [Next.js quickstart](docs/clerk.md): install, environment variables, provider, middleware, protected routes
+diff --git a/package.json b/package.json
+index 9cf33ec..973e43e 100644
+--- a/package.json
++++ b/package.json
+@@ -9,15 +9,13 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
+-    "bcryptjs": "^3.0.3",
++    "@clerk/nextjs": "^7.9.1",
+     "next": "16.3.4",
+-    "next-auth": "^5.0.0-beta.32",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+-    "@types/bcryptjs": "^2.4.6",
+     "@types/node": "^20",
+     "@types/react": "^19",
+     "@types/react-dom": "^19",
+diff --git a/src/app/account/danger-zone.tsx b/src/app/account/danger-zone.tsx
+new file mode 100644
+index 0000000..a4a9fc4
+--- /dev/null
++++ b/src/app/account/danger-zone.tsx
+@@ -0,0 +1,82 @@
++"use client";
++
++import { useState } from "react";
++import { useClerk } from "@clerk/nextjs";
++
++// Rendered as a custom tab inside <UserProfile>. Password changes and
++// per-device session review already live in Clerk's own Security tab; this
++// covers the two actions that need our own backend route because Clerk's
++// frontend SDK only ever sees sessions on *this* browser, not other devices.
++export function DangerZone() {
++  const { signOut } = useClerk();
++  const [signingOut, setSigningOut] = useState(false);
++  const [deleting, setDeleting] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleSignOutEverywhere() {
++    setError(null);
++    setSigningOut(true);
++    try {
++      const res = await fetch("/api/account/sign-out-everywhere", { method: "POST" });
++      if (!res.ok) throw new Error("Could not sign out of all devices.");
++      await signOut({ redirectUrl: "/signin" });
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "Something went wrong.");
++      setSigningOut(false);
++    }
++  }
++
++  async function handleDeleteAccount() {
++    if (!window.confirm("Delete your account? This can't be undone.")) return;
++    setError(null);
++    setDeleting(true);
++    try {
++      const res = await fetch("/api/account/delete", { method: "POST" });
++      if (!res.ok) throw new Error("Could not delete your account.");
++      window.location.href = "/";
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "Something went wrong.");
++      setDeleting(false);
++    }
++  }
++
++  return (
++    <div className="space-y-8 px-1 py-4">
++      <section className="space-y-2">
++        <h2 className="text-base font-medium">Sign out of all devices</h2>
++        <p className="text-sm text-zinc-500">
++          Ends every active session for your account — this browser and any others
++          (phone, other computers, etc.) — and signs you out here too.
++        </p>
++        <button
++          type="button"
++          onClick={handleSignOutEverywhere}
++          disabled={signingOut}
++          className="h-9 rounded-full border border-black/[.08] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-60 dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++        >
++          {signingOut ? "Signing out…" : "Sign out everywhere"}
++        </button>
++      </section>
++
++      <section className="space-y-2 border-t border-black/[.08] pt-6 dark:border-white/[.145]">
++        <h2 className="text-base font-medium text-red-600 dark:text-red-400">
++          Delete account
++        </h2>
++        <p className="text-sm text-zinc-500">
++          Permanently deletes your account and signs you out everywhere. There is no
++          undo.
++        </p>
++        <button
++          type="button"
++          onClick={handleDeleteAccount}
++          disabled={deleting}
++          className="h-9 rounded-full bg-red-600 px-4 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-60"
++        >
++          {deleting ? "Deleting…" : "Delete my account"}
++        </button>
++      </section>
++
++      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++    </div>
++  );
++}
+diff --git a/src/app/account/page.tsx b/src/app/account/page.tsx
+new file mode 100644
+index 0000000..43051b1
+--- /dev/null
++++ b/src/app/account/page.tsx
+@@ -0,0 +1,21 @@
++import { UserProfile } from "@clerk/nextjs";
++import { DangerZone } from "./danger-zone";
++
++// Password change and active-device review are Clerk's built-in Security tab;
++// "sign out everywhere" and "delete account" are bolted on as a custom tab
++// (see danger-zone.tsx + the two routes under api/account).
++export default function AccountPage() {
++  return (
++    <main className="mx-auto flex max-w-4xl flex-1 justify-center p-8">
++      <UserProfile routing="hash">
++        <UserProfile.Page
++          label="Danger zone"
++          url="danger"
++          labelIcon={<span aria-hidden>⚠️</span>}
++        >
++          <DangerZone />
++        </UserProfile.Page>
++      </UserProfile>
++    </main>
++  );
++}
+diff --git a/src/app/api/account/delete/route.ts b/src/app/api/account/delete/route.ts
+new file mode 100644
+index 0000000..fc16591
+--- /dev/null
++++ b/src/app/api/account/delete/route.ts
+@@ -0,0 +1,17 @@
++import { NextResponse } from "next/server";
++import { auth, clerkClient } from "@clerk/nextjs/server";
++
++// Self-service delete via the Backend API — this works regardless of the
++// Clerk Dashboard's "allow users to delete their own account" toggle, since
++// we're deleting the same user the verified session belongs to.
++export async function POST() {
++  const { userId } = await auth();
++  if (!userId) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  const client = await clerkClient();
++  await client.users.deleteUser(userId);
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/account/sign-out-everywhere/route.ts b/src/app/api/account/sign-out-everywhere/route.ts
+new file mode 100644
+index 0000000..5f6ba13
+--- /dev/null
++++ b/src/app/api/account/sign-out-everywhere/route.ts
+@@ -0,0 +1,22 @@
++import { NextResponse } from "next/server";
++import { auth, clerkClient } from "@clerk/nextjs/server";
++
++// Revokes every active session for the current user across all devices —
++// Clerk's frontend SDK only ever sees sessions on the calling browser, so this
++// has to go through the Backend API.
++export async function POST() {
++  const { userId } = await auth();
++  if (!userId) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  const client = await clerkClient();
++  const { data: sessions } = await client.sessions.getSessionList({
++    userId,
++    status: "active",
++  });
++
++  await Promise.all(sessions.map((session) => client.sessions.revokeSession(session.id)));
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/auth/[...nextauth]/route.ts b/src/app/api/auth/[...nextauth]/route.ts
+deleted file mode 100644
+index 86c9f3d..0000000
+--- a/src/app/api/auth/[...nextauth]/route.ts
++++ /dev/null
+@@ -1,3 +0,0 @@
+-import { handlers } from "@/auth";
+-
+-export const { GET, POST } = handlers;
+diff --git a/src/app/api/signup/route.ts b/src/app/api/signup/route.ts
+deleted file mode 100644
+index 1d9943e..0000000
+--- a/src/app/api/signup/route.ts
++++ /dev/null
+@@ -1,22 +0,0 @@
+-import { NextResponse } from "next/server";
+-import { createUser, getUserByEmail } from "@/lib/users";
+-
+-export async function POST(req: Request) {
+-  const body = await req.json().catch(() => null);
+-  const email = typeof body?.email === "string" ? body.email.trim() : "";
+-  const password = typeof body?.password === "string" ? body.password : "";
+-  const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : email.split("@")[0];
+-
+-  if (!email || !email.includes("@")) {
+-    return NextResponse.json({ error: "Enter a valid email address." }, { status: 400 });
+-  }
+-  if (password.length < 8) {
+-    return NextResponse.json({ error: "Password must be at least 8 characters." }, { status: 400 });
+-  }
+-  if (await getUserByEmail(email)) {
+-    return NextResponse.json({ error: "An account with that email already exists." }, { status: 409 });
+-  }
+-
+-  await createUser({ email, name, password });
+-  return NextResponse.json({ ok: true });
+-}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..f424c73 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,19 +1,22 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { currentUser } from "@clerk/nextjs/server";
++import { listTeammates } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
+-  const me = await getCurrentUser();
+-  const all = await listUsers();
++  const me = await currentUser();
++  const email = me?.emailAddresses.find((e) => e.id === me.primaryEmailAddressId)
++    ?.emailAddress;
++  const team = await listTeammates();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+       <h1 className="text-2xl font-semibold">Dashboard</h1>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me?.firstName ?? me?.fullName ?? "nobody"} ({email ?? "—"})
+       </p>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+-        {all.map((u) => (
++        {team.map((u) => (
+           <li key={u.id} className="text-sm">
+             {u.name} — {u.email} — joined {u.createdAt}
+           </li>
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 4cd578f..de94a20 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -2,7 +2,8 @@ import type { Metadata } from "next";
+ import { Geist, Geist_Mono } from "next/font/google";
+ import Link from "next/link";
+ import "./globals.css";
+-import { auth } from "@/auth";
++import { ClerkProvider } from "@clerk/nextjs";
++import { currentUser } from "@clerk/nextjs/server";
+ import { SignOutButton } from "./sign-out-button";
+ 
+ const geistSans = Geist({
+@@ -21,7 +22,9 @@ export const metadata: Metadata = {
+ };
+ 
+ export default async function RootLayout({ children }: LayoutProps<"/">) {
+-  const session = await auth();
++  const user = await currentUser();
++  const email = user?.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)
++    ?.emailAddress;
+ 
+   return (
+     <html
+@@ -29,32 +32,41 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
+       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+     >
+       <body className="min-h-full flex flex-col">
+-        <header className="flex items-center justify-between border-b border-black/[.08] px-6 py-4 text-sm dark:border-white/[.145]">
+-          <Link href="/" className="font-semibold">
+-            Notely
+-          </Link>
+-          <nav className="flex items-center gap-4">
+-            {session?.user ? (
+-              <>
+-                <Link href="/dashboard" className="font-medium">
+-                  Dashboard
+-                </Link>
+-                <span className="text-zinc-500">{session.user.email}</span>
+-                <SignOutButton />
+-              </>
+-            ) : (
+-              <>
+-                <Link href="/signin" className="font-medium">
+-                  Sign in
+-                </Link>
+-                <Link href="/signup" className="font-medium">
+-                  Sign up
+-                </Link>
+-              </>
+-            )}
+-          </nav>
+-        </header>
+-        <div className="flex flex-1 flex-col">{children}</div>
++        <ClerkProvider
++          appearance={{
++            variables: { colorPrimary: "#000000" },
++          }}
++        >
++          <header className="flex items-center justify-between border-b border-black/[.08] px-6 py-4 text-sm dark:border-white/[.145]">
++            <Link href="/" className="font-semibold">
++              Notely
++            </Link>
++            <nav className="flex items-center gap-4">
++              {user ? (
++                <>
++                  <Link href="/dashboard" className="font-medium">
++                    Dashboard
++                  </Link>
++                  <Link href="/account" className="font-medium">
++                    Account
++                  </Link>
++                  <span className="text-zinc-500">{email}</span>
++                  <SignOutButton />
++                </>
++              ) : (
++                <>
++                  <Link href="/signin" className="font-medium">
++                    Sign in
++                  </Link>
++                  <Link href="/signup" className="font-medium">
++                    Sign up
++                  </Link>
++                </>
++              )}
++            </nav>
++          </header>
++          <div className="flex flex-1 flex-col">{children}</div>
++        </ClerkProvider>
+       </body>
+     </html>
+   );
+diff --git a/src/app/sign-out-button.tsx b/src/app/sign-out-button.tsx
+index 59a71dd..7bfe9eb 100644
+--- a/src/app/sign-out-button.tsx
++++ b/src/app/sign-out-button.tsx
+@@ -1,12 +1,14 @@
+ "use client";
+ 
+-import { signOut } from "next-auth/react";
++import { useClerk } from "@clerk/nextjs";
+ 
+ export function SignOutButton() {
++  const { signOut } = useClerk();
++
+   return (
+     <button
+       type="button"
+-      onClick={() => signOut({ callbackUrl: "/" })}
++      onClick={() => signOut({ redirectUrl: "/" })}
+       className="text-sm font-medium underline"
+     >
+       Sign out
+diff --git a/src/app/signin/page.tsx b/src/app/signin/page.tsx
+index 6aa64f2..12558f2 100644
+--- a/src/app/signin/page.tsx
++++ b/src/app/signin/page.tsx
+@@ -1,117 +1,22 @@
+-"use client";
+-
+-import { Suspense, useState, type FormEvent } from "react";
+-import { signIn } from "next-auth/react";
+-import { useSearchParams } from "next/navigation";
+-import Link from "next/link";
++import { SignIn } from "@clerk/nextjs";
+ 
++// Password, Google, and "email me a sign-in link" (magic link) all come from
++// this one component — which factors show up is configured in the Clerk
++// Dashboard (User & authentication → Email, phone, username), not here.
+ export default function SignInPage() {
+-  return (
+-    <Suspense>
+-      <SignInForm />
+-    </Suspense>
+-  );
+-}
+-
+-function SignInForm() {
+-  const searchParams = useSearchParams();
+-  const callbackUrl = searchParams.get("callbackUrl") ?? "/dashboard";
+-
+-  const [email, setEmail] = useState("");
+-  const [password, setPassword] = useState("");
+-  const [error, setError] = useState<string | null>(null);
+-  const [loading, setLoading] = useState(false);
+-
+-  async function handleCredentialsSignIn(e: FormEvent) {
+-    e.preventDefault();
+-    setError(null);
+-    setLoading(true);
+-
+-    const res = await signIn("credentials", {
+-      email,
+-      password,
+-      redirect: false,
+-      callbackUrl,
+-    });
+-
+-    setLoading(false);
+-
+-    if (res?.error) {
+-      setError("Invalid email or password.");
+-      return;
+-    }
+-
+-    window.location.href = res?.url ?? callbackUrl;
+-  }
+-
+   return (
+     <div className="flex flex-1 items-center justify-center bg-zinc-50 px-4 py-16 dark:bg-black">
+-      <div className="w-full max-w-sm space-y-6 rounded-xl border border-black/[.08] bg-white p-8 dark:border-white/[.145] dark:bg-zinc-950">
+-        <div className="space-y-1">
+-          <h1 className="text-xl font-semibold text-black dark:text-zinc-50">
+-            Sign in to Notely
+-          </h1>
+-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+-            Don&apos;t have an account?{" "}
+-            <Link href="/signup" className="font-medium underline">
+-              Sign up
+-            </Link>
+-          </p>
+-        </div>
+-
+-        <button
+-          type="button"
+-          onClick={() => signIn("google", { callbackUrl })}
+-          className="flex h-11 w-full items-center justify-center gap-2 rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
+-        >
+-          Continue with Google
+-        </button>
+-
+-        <div className="flex items-center gap-3 text-xs uppercase text-zinc-400">
+-          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
+-          or
+-          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
+-        </div>
+-
+-        <form onSubmit={handleCredentialsSignIn} className="space-y-4">
+-          <div className="space-y-1">
+-            <label htmlFor="email" className="text-sm font-medium">
+-              Email
+-            </label>
+-            <input
+-              id="email"
+-              type="email"
+-              required
+-              value={email}
+-              onChange={(e) => setEmail(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-          </div>
+-          <div className="space-y-1">
+-            <label htmlFor="password" className="text-sm font-medium">
+-              Password
+-            </label>
+-            <input
+-              id="password"
+-              type="password"
+-              required
+-              value={password}
+-              onChange={(e) => setPassword(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-          </div>
+-
+-          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+-
+-          <button
+-            type="submit"
+-            disabled={loading}
+-            className="flex h-11 w-full items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
+-          >
+-            {loading ? "Signing in…" : "Sign in"}
+-          </button>
+-        </form>
+-      </div>
++      <SignIn
++        routing="hash"
++        signUpUrl="/signup"
++        fallbackRedirectUrl="/dashboard"
++        appearance={{
++          elements: {
++            rootBox: "w-full max-w-sm",
++            card: "rounded-xl border border-black/[.08] shadow-none dark:border-white/[.145]",
++          },
++        }}
++      />
+     </div>
+   );
+ }
+diff --git a/src/app/signup/page.tsx b/src/app/signup/page.tsx
+index 071ce16..9e2edb3 100644
+--- a/src/app/signup/page.tsx
++++ b/src/app/signup/page.tsx
+@@ -1,134 +1,19 @@
+-"use client";
+-
+-import { useState, type FormEvent } from "react";
+-import { signIn } from "next-auth/react";
+-import Link from "next/link";
++import { SignUp } from "@clerk/nextjs";
+ 
+ export default function SignUpPage() {
+-  const [name, setName] = useState("");
+-  const [email, setEmail] = useState("");
+-  const [password, setPassword] = useState("");
+-  const [error, setError] = useState<string | null>(null);
+-  const [loading, setLoading] = useState(false);
+-
+-  async function handleSignUp(e: FormEvent) {
+-    e.preventDefault();
+-    setError(null);
+-    setLoading(true);
+-
+-    const res = await fetch("/api/signup", {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ name, email, password }),
+-    });
+-    const data = await res.json();
+-
+-    if (!res.ok) {
+-      setError(data.error ?? "Something went wrong.");
+-      setLoading(false);
+-      return;
+-    }
+-
+-    // Account created — sign them straight in.
+-    const signInRes = await signIn("credentials", {
+-      email,
+-      password,
+-      redirect: false,
+-      callbackUrl: "/dashboard",
+-    });
+-
+-    setLoading(false);
+-
+-    if (signInRes?.error) {
+-      setError("Account created, but sign-in failed. Try signing in manually.");
+-      return;
+-    }
+-
+-    window.location.href = signInRes?.url ?? "/dashboard";
+-  }
+-
+   return (
+     <div className="flex flex-1 items-center justify-center bg-zinc-50 px-4 py-16 dark:bg-black">
+-      <div className="w-full max-w-sm space-y-6 rounded-xl border border-black/[.08] bg-white p-8 dark:border-white/[.145] dark:bg-zinc-950">
+-        <div className="space-y-1">
+-          <h1 className="text-xl font-semibold text-black dark:text-zinc-50">
+-            Create your Notely account
+-          </h1>
+-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+-            Already have an account?{" "}
+-            <Link href="/signin" className="font-medium underline">
+-              Sign in
+-            </Link>
+-          </p>
+-        </div>
+-
+-        <button
+-          type="button"
+-          onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
+-          className="flex h-11 w-full items-center justify-center gap-2 rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
+-        >
+-          Continue with Google
+-        </button>
+-
+-        <div className="flex items-center gap-3 text-xs uppercase text-zinc-400">
+-          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
+-          or
+-          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
+-        </div>
+-
+-        <form onSubmit={handleSignUp} className="space-y-4">
+-          <div className="space-y-1">
+-            <label htmlFor="name" className="text-sm font-medium">
+-              Name
+-            </label>
+-            <input
+-              id="name"
+-              type="text"
+-              value={name}
+-              onChange={(e) => setName(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-          </div>
+-          <div className="space-y-1">
+-            <label htmlFor="email" className="text-sm font-medium">
+-              Email
+-            </label>
+-            <input
+-              id="email"
+-              type="email"
+-              required
+-              value={email}
+-              onChange={(e) => setEmail(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-          </div>
+-          <div className="space-y-1">
+-            <label htmlFor="password" className="text-sm font-medium">
+-              Password
+-            </label>
+-            <input
+-              id="password"
+-              type="password"
+-              required
+-              minLength={8}
+-              value={password}
+-              onChange={(e) => setPassword(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-            <p className="text-xs text-zinc-500">At least 8 characters.</p>
+-          </div>
+-
+-          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+-
+-          <button
+-            type="submit"
+-            disabled={loading}
+-            className="flex h-11 w-full items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
+-          >
+-            {loading ? "Creating account…" : "Create account"}
+-          </button>
+-        </form>
+-      </div>
++      <SignUp
++        routing="hash"
++        signInUrl="/signin"
++        fallbackRedirectUrl="/dashboard"
++        appearance={{
++          elements: {
++            rootBox: "w-full max-w-sm",
++            card: "rounded-xl border border-black/[.08] shadow-none dark:border-white/[.145]",
++          },
++        }}
++      />
+     </div>
+   );
+ }
+diff --git a/src/auth.ts b/src/auth.ts
+deleted file mode 100644
+index f971895..0000000
+--- a/src/auth.ts
++++ /dev/null
+@@ -1,46 +0,0 @@
+-import NextAuth from "next-auth";
+-import Credentials from "next-auth/providers/credentials";
+-import Google from "next-auth/providers/google";
+-import { findOrCreateOAuthUser, verifyPassword } from "@/lib/users";
+-
+-export const { handlers, signIn, signOut, auth } = NextAuth({
+-  providers: [
+-    Google({
+-      clientId: process.env.GOOGLE_CLIENT_ID,
+-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+-    }),
+-    Credentials({
+-      name: "Email and password",
+-      credentials: {
+-        email: { label: "Email", type: "email" },
+-        password: { label: "Password", type: "password" },
+-      },
+-      authorize: async (credentials) => {
+-        const email = credentials?.email;
+-        const password = credentials?.password;
+-        if (typeof email !== "string" || typeof password !== "string") return null;
+-
+-        const user = await verifyPassword(email, password);
+-        if (!user) return null;
+-
+-        return { id: user.id, email: user.email, name: user.name };
+-      },
+-    }),
+-  ],
+-  session: { strategy: "jwt" },
+-  pages: {
+-    signIn: "/signin",
+-  },
+-  callbacks: {
+-    async signIn({ user, account }) {
+-      // Provision (or link to) a local user record on first Google sign-in.
+-      if (account?.provider === "google" && user.email) {
+-        await findOrCreateOAuthUser({
+-          email: user.email,
+-          name: user.name ?? user.email,
+-        });
+-      }
+-      return true;
+-    },
+-  },
+-});
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index e54946a..c87e675 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,107 +1,17 @@
+-import bcrypt from "bcryptjs";
+-
+-export type User = {
++// Demo directory shown on the dashboard's "Team" list. Unrelated to
++// authentication now — accounts live in Clerk. See src/app/dashboard/page.tsx.
++export type TeammateEntry = {
+   id: string;
+-  email: string;
+   name: string;
++  email: string;
+   createdAt: string;
+-  // Absent for users who only ever signed in via an OAuth provider (e.g. Google).
+-  passwordHash?: string;
+ };
+ 
+-// Next.js (Turbopack, in both dev and prod) can load this module more than once —
+-// route handlers and page renders don't always land in the same module instance.
+-// Pin the store on globalThis so every instance reads/writes the same array within
+-// this process; otherwise sign-ups made via /api/signup silently "vanish" when the
+-// dashboard re-reads users through a different copy of this module.
+-const globalForUsers = globalThis as unknown as { __notelyUsers?: User[] };
+-
+-const users: User[] =
+-  globalForUsers.__notelyUsers ??
+-  (globalForUsers.__notelyUsers = [
+-    { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-    { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+-  ]);
+-
+-export async function listUsers(): Promise<User[]> {
+-  return users;
+-}
+-
+-export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
+-}
+-
+-export async function getUserByEmail(email: string): Promise<User | undefined> {
+-  const normalized = email.toLowerCase();
+-  return users.find((u) => u.email.toLowerCase() === normalized);
+-}
+-
+-function nextId(): string {
+-  return String(users.length + 1);
+-}
+-
+-function today(): string {
+-  return new Date().toISOString().slice(0, 10);
+-}
+-
+-// Used by the credentials sign-up flow.
+-export async function createUser({
+-  email,
+-  name,
+-  password,
+-}: {
+-  email: string;
+-  name: string;
+-  password: string;
+-}): Promise<User> {
+-  if (await getUserByEmail(email)) {
+-    throw new Error("A user with that email already exists");
+-  }
+-  const passwordHash = await bcrypt.hash(password, 10);
+-  const user: User = {
+-    id: nextId(),
+-    email,
+-    name,
+-    createdAt: today(),
+-    passwordHash,
+-  };
+-  users.push(user);
+-  return user;
+-}
+-
+-// Used by the credentials sign-in flow. Returns the user only if the password matches.
+-export async function verifyPassword(
+-  email: string,
+-  password: string
+-): Promise<User | undefined> {
+-  const user = await getUserByEmail(email);
+-  if (!user?.passwordHash) return undefined;
+-  const valid = await bcrypt.compare(password, user.passwordHash);
+-  return valid ? user : undefined;
+-}
+-
+-// Used by OAuth providers (e.g. Google): find the existing account by email, or
+-// provision one on first sign-in. OAuth-only users have no passwordHash, so they
+-// can't also be logged into via the credentials form.
+-export async function findOrCreateOAuthUser({
+-  email,
+-  name,
+-}: {
+-  email: string;
+-  name: string;
+-}): Promise<User> {
+-  const existing = await getUserByEmail(email);
+-  if (existing) return existing;
+-  const user: User = { id: nextId(), email, name, createdAt: today() };
+-  users.push(user);
+-  return user;
+-}
++const teammates: TeammateEntry[] = [
++  { id: "1", name: "Ada", email: "ada@example.com", createdAt: "2026-01-04" },
++  { id: "2", name: "Grace", email: "grace@example.com", createdAt: "2026-02-11" },
++];
+ 
+-export async function getCurrentUser(): Promise<User | undefined> {
+-  // Imported lazily to avoid a module cycle: src/auth.ts imports from this file
+-  // (verifyPassword, findOrCreateOAuthUser) to implement its providers.
+-  const { auth } = await import("@/auth");
+-  const session = await auth();
+-  if (!session?.user?.email) return undefined;
+-  return getUserByEmail(session.user.email);
++export async function listTeammates(): Promise<TeammateEntry[]> {
++  return teammates;
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+index 4871999..3b9d91c 100644
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -1,16 +1,15 @@
+-import { NextResponse } from "next/server";
+-import { auth } from "@/auth";
++import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+ 
+-export default auth((req) => {
+-  const isLoggedIn = !!req.auth;
++const isProtectedRoute = createRouteMatcher(["/dashboard(.*)", "/account(.*)"]);
+ 
+-  if (!isLoggedIn) {
+-    const signInUrl = new URL("/signin", req.nextUrl.origin);
+-    signInUrl.searchParams.set("callbackUrl", req.nextUrl.pathname);
+-    return NextResponse.redirect(signInUrl);
++export default clerkMiddleware(async (auth, req) => {
++  if (isProtectedRoute(req)) {
++    await auth.protect();
+   }
+ });
+ 
+ export const config = {
+-  matcher: ["/dashboard/:path*"],
++  // Run on everything except static assets and Next internals, plus API routes —
++  // Clerk needs this broad match to keep session state in sync app-wide.
++  matcher: ["/((?!_next|.*\\..*).*)", "/(api|trpc)(.*)"],
+ };

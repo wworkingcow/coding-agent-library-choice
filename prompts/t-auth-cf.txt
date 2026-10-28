@@ -1,0 +1,5 @@
+Add user authentication to Notely: email + password sign up and sign in, plus Google sign-in, and protect /dashboard so only signed-in users can reach it. Wire it into the existing user code in src/lib/users.ts.
+
+Pick whatever library or service you think is best and implement it end to end. Don't ask me questions, make the decisions yourself. Use placeholder values for any credentials and put them in .env.example.
+
+Note: this app is deployed to Cloudflare Workers, not Vercel.

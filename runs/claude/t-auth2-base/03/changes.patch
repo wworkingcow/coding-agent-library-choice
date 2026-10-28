@@ -1,0 +1,925 @@
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/src/app/account/account-forms.tsx b/src/app/account/account-forms.tsx
+new file mode 100644
+index 0000000..e35374d
+--- /dev/null
++++ b/src/app/account/account-forms.tsx
+@@ -0,0 +1,243 @@
++"use client";
++
++import { useState, type FormEvent } from "react";
++import { signIn, signOut } from "next-auth/react";
++
++const inputClass =
++  "w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40";
++
++const sectionClass =
++  "space-y-4 rounded-xl border border-black/[.08] p-6 dark:border-white/[.145]";
++
++export function AccountForms({ email, hasPassword }: { email: string; hasPassword: boolean }) {
++  return (
++    <div className="mt-8 space-y-6">
++      <PasswordSection email={email} hasPassword={hasPassword} />
++      <SignOutEverywhereSection />
++      <DeleteAccountSection />
++    </div>
++  );
++}
++
++function PasswordSection({ email, hasPassword }: { email: string; hasPassword: boolean }) {
++  const [currentPassword, setCurrentPassword] = useState("");
++  const [newPassword, setNewPassword] = useState("");
++  const [confirmPassword, setConfirmPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [success, setSuccess] = useState(false);
++  const [loading, setLoading] = useState(false);
++
++  async function handleSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setSuccess(false);
++
++    if (newPassword !== confirmPassword) {
++      setError("New passwords don't match.");
++      return;
++    }
++
++    setLoading(true);
++
++    const res = await fetch("/api/account/password", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ currentPassword, newPassword }),
++    });
++    const data = await res.json().catch(() => null);
++
++    if (!res.ok) {
++      setError(data?.error ?? "Something went wrong.");
++      setLoading(false);
++      return;
++    }
++
++    // Changing the password bumped the session version server-side, which
++    // invalidates this browser's session too — re-authenticate right away so
++    // the user isn't unexpectedly signed out after a successful change.
++    await signIn("credentials", { email, password: newPassword, redirect: false });
++
++    setCurrentPassword("");
++    setNewPassword("");
++    setConfirmPassword("");
++    setSuccess(true);
++    setLoading(false);
++  }
++
++  return (
++    <section className={sectionClass}>
++      <div>
++        <h2 className="text-lg font-medium">{hasPassword ? "Change password" : "Set a password"}</h2>
++        {!hasPassword && (
++          <p className="mt-1 text-sm opacity-70">
++            Your account currently has no password — you sign in with Google or a magic link. Set
++            one to also enable email/password sign-in.
++          </p>
++        )}
++      </div>
++
++      <form onSubmit={handleSubmit} className="space-y-4">
++        {hasPassword && (
++          <div className="space-y-1">
++            <label htmlFor="currentPassword" className="text-sm font-medium">
++              Current password
++            </label>
++            <input
++              id="currentPassword"
++              type="password"
++              required
++              value={currentPassword}
++              onChange={(e) => setCurrentPassword(e.target.value)}
++              className={inputClass}
++            />
++          </div>
++        )}
++        <div className="space-y-1">
++          <label htmlFor="newPassword" className="text-sm font-medium">
++            New password
++          </label>
++          <input
++            id="newPassword"
++            type="password"
++            required
++            minLength={8}
++            value={newPassword}
++            onChange={(e) => setNewPassword(e.target.value)}
++            className={inputClass}
++          />
++        </div>
++        <div className="space-y-1">
++          <label htmlFor="confirmPassword" className="text-sm font-medium">
++            Confirm new password
++          </label>
++          <input
++            id="confirmPassword"
++            type="password"
++            required
++            minLength={8}
++            value={confirmPassword}
++            onChange={(e) => setConfirmPassword(e.target.value)}
++            className={inputClass}
++          />
++        </div>
++
++        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++        {success && (
++          <p className="text-sm text-green-600 dark:text-green-400">Password updated.</p>
++        )}
++
++        <button
++          type="submit"
++          disabled={loading}
++          className="flex h-10 items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
++        >
++          {loading ? "Saving…" : hasPassword ? "Update password" : "Set password"}
++        </button>
++      </form>
++    </section>
++  );
++}
++
++function SignOutEverywhereSection() {
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleSignOutEverywhere() {
++    setError(null);
++    setLoading(true);
++
++    const res = await fetch("/api/account/sign-out-everywhere", { method: "POST" });
++
++    if (!res.ok) {
++      const data = await res.json().catch(() => null);
++      setError(data?.error ?? "Something went wrong.");
++      setLoading(false);
++      return;
++    }
++
++    await signOut({ callbackUrl: "/signin" });
++  }
++
++  return (
++    <section className={sectionClass}>
++      <div>
++        <h2 className="text-lg font-medium">Sign out of all devices</h2>
++        <p className="mt-1 text-sm opacity-70">
++          Ends every signed-in session for this account, including this one. You&apos;ll need to
++          sign in again everywhere.
++        </p>
++      </div>
++
++      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++
++      <button
++        type="button"
++        onClick={handleSignOutEverywhere}
++        disabled={loading}
++        className="flex h-10 items-center justify-center rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-60 dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++      >
++        {loading ? "Signing out…" : "Sign out everywhere"}
++      </button>
++    </section>
++  );
++}
++
++function DeleteAccountSection() {
++  const [confirmText, setConfirmText] = useState("");
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  const canDelete = confirmText === "DELETE";
++
++  async function handleDelete() {
++    if (!canDelete) return;
++    setError(null);
++    setLoading(true);
++
++    const res = await fetch("/api/account/delete", { method: "POST" });
++
++    if (!res.ok) {
++      const data = await res.json().catch(() => null);
++      setError(data?.error ?? "Something went wrong.");
++      setLoading(false);
++      return;
++    }
++
++    await signOut({ callbackUrl: "/" });
++  }
++
++  return (
++    <section className={`${sectionClass} border-red-600/30`}>
++      <div>
++        <h2 className="text-lg font-medium text-red-600 dark:text-red-400">Delete account</h2>
++        <p className="mt-1 text-sm opacity-70">
++          Permanently deletes your account and signs you out everywhere. This can&apos;t be undone.
++        </p>
++      </div>
++
++      <div className="space-y-1">
++        <label htmlFor="confirmDelete" className="text-sm font-medium">
++          Type DELETE to confirm
++        </label>
++        <input
++          id="confirmDelete"
++          type="text"
++          value={confirmText}
++          onChange={(e) => setConfirmText(e.target.value)}
++          className={inputClass}
++        />
++      </div>
++
++      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++
++      <button
++        type="button"
++        onClick={handleDelete}
++        disabled={!canDelete || loading}
++        className="flex h-10 items-center justify-center rounded-full bg-red-600 px-5 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-40"
++      >
++        {loading ? "Deleting…" : "Delete my account"}
++      </button>
++    </section>
++  );
++}
+diff --git a/src/app/account/page.tsx b/src/app/account/page.tsx
+new file mode 100644
+index 0000000..c8573a5
+--- /dev/null
++++ b/src/app/account/page.tsx
+@@ -0,0 +1,19 @@
++import { redirect } from "next/navigation";
++import { getCurrentUser } from "@/lib/users";
++import { AccountForms } from "./account-forms";
++
++export default async function AccountPage() {
++  const me = await getCurrentUser();
++  if (!me) {
++    redirect("/signin?callbackUrl=/account");
++  }
++
++  return (
++    <main className="mx-auto w-full max-w-2xl p-8">
++      <h1 className="text-2xl font-semibold">Account</h1>
++      <p className="mt-2 text-sm opacity-70">{me.email}</p>
++
++      <AccountForms email={me.email} hasPassword={Boolean(me.passwordHash)} />
++    </main>
++  );
++}
+diff --git a/src/app/api/account/delete/route.ts b/src/app/api/account/delete/route.ts
+new file mode 100644
+index 0000000..c095146
+--- /dev/null
++++ b/src/app/api/account/delete/route.ts
+@@ -0,0 +1,14 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/auth";
++import { deleteUserByEmail } from "@/lib/users";
++
++export async function POST() {
++  const session = await auth();
++  const email = session?.user?.email;
++  if (!email) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  await deleteUserByEmail(email);
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/account/password/route.ts b/src/app/api/account/password/route.ts
+new file mode 100644
+index 0000000..23def26
+--- /dev/null
++++ b/src/app/api/account/password/route.ts
+@@ -0,0 +1,43 @@
++import { NextResponse } from "next/server";
++import bcrypt from "bcryptjs";
++import { auth } from "@/auth";
++import { bumpSessionVersion, getUserByEmail, setUserPassword } from "@/lib/users";
++
++export async function POST(req: Request) {
++  const session = await auth();
++  const email = session?.user?.email;
++  if (!email) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  const body = await req.json().catch(() => null);
++  const currentPassword = typeof body?.currentPassword === "string" ? body.currentPassword : "";
++  const newPassword = typeof body?.newPassword === "string" ? body.newPassword : "";
++
++  if (newPassword.length < 8) {
++    return NextResponse.json({ error: "New password must be at least 8 characters." }, { status: 400 });
++  }
++
++  const user = await getUserByEmail(email);
++  if (!user) {
++    return NextResponse.json({ error: "Account not found." }, { status: 404 });
++  }
++
++  // Users who signed up via Google or a magic link have no password yet —
++  // let them set one without proving a "current" password that never
++  // existed. Anyone who already has one must confirm it first.
++  if (user.passwordHash) {
++    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
++    if (!valid) {
++      return NextResponse.json({ error: "Current password is incorrect." }, { status: 400 });
++    }
++  }
++
++  await setUserPassword(email, newPassword);
++  // A password change invalidates every outstanding session, including this
++  // one — the client re-authenticates immediately afterward with the new
++  // password to pick up a fresh token.
++  await bumpSessionVersion(email);
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/account/sign-out-everywhere/route.ts b/src/app/api/account/sign-out-everywhere/route.ts
+new file mode 100644
+index 0000000..35a009e
+--- /dev/null
++++ b/src/app/api/account/sign-out-everywhere/route.ts
+@@ -0,0 +1,16 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/auth";
++import { bumpSessionVersion } from "@/lib/users";
++
++export async function POST() {
++  const session = await auth();
++  const email = session?.user?.email;
++  if (!email) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  // Invalidates every JWT issued for this account, including the one making
++  // this request — the client signs itself out right after calling this.
++  await bumpSessionVersion(email);
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/auth/magic-link/route.ts b/src/app/api/auth/magic-link/route.ts
+new file mode 100644
+index 0000000..b0d9a3d
+--- /dev/null
++++ b/src/app/api/auth/magic-link/route.ts
+@@ -0,0 +1,26 @@
++import { NextResponse } from "next/server";
++import { createMagicLinkToken } from "@/lib/magic-links";
++import { sendMagicLinkEmail } from "@/lib/email";
++
++export async function POST(req: Request) {
++  const body = await req.json().catch(() => null);
++  const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
++
++  if (!email || !email.includes("@")) {
++    return NextResponse.json({ error: "Enter a valid email address." }, { status: 400 });
++  }
++
++  const token = createMagicLinkToken(email);
++  const url = new URL("/auth/magic-link", req.url);
++  url.searchParams.set("token", token);
++
++  await sendMagicLinkEmail(email, url.toString());
++
++  const isDev = process.env.NODE_ENV !== "production";
++  return NextResponse.json({
++    ok: true,
++    // Only surfaced outside production, so magic-link sign-in is testable
++    // without a real RESEND_API_KEY configured.
++    ...(isDev ? { devLink: url.toString() } : {}),
++  });
++}
+diff --git a/src/app/auth/magic-link/page.tsx b/src/app/auth/magic-link/page.tsx
+new file mode 100644
+index 0000000..1a96849
+--- /dev/null
++++ b/src/app/auth/magic-link/page.tsx
+@@ -0,0 +1,62 @@
++"use client";
++
++import { Suspense, useEffect, useState } from "react";
++import { signIn } from "next-auth/react";
++import { useSearchParams } from "next/navigation";
++import Link from "next/link";
++
++export default function MagicLinkPage() {
++  return (
++    <Suspense>
++      <MagicLinkVerifier />
++    </Suspense>
++  );
++}
++
++function MagicLinkVerifier() {
++  const searchParams = useSearchParams();
++  const token = searchParams.get("token");
++  const [status, setStatus] = useState<"verifying" | "error">(token ? "verifying" : "error");
++
++  useEffect(() => {
++    if (!token) return;
++
++    let cancelled = false;
++
++    signIn("magic-link", { token, redirect: false, callbackUrl: "/dashboard" }).then((res) => {
++      if (cancelled) return;
++      if (res?.error) {
++        setStatus("error");
++        return;
++      }
++      window.location.href = res?.url ?? "/dashboard";
++    });
++
++    return () => {
++      cancelled = true;
++    };
++  }, [token]);
++
++  return (
++    <div className="flex flex-1 items-center justify-center bg-zinc-50 px-4 py-16 dark:bg-black">
++      <div className="w-full max-w-sm space-y-4 rounded-xl border border-black/[.08] bg-white p-8 text-center dark:border-white/[.145] dark:bg-zinc-950">
++        {status === "verifying" ? (
++          <p className="text-sm text-zinc-600 dark:text-zinc-400">Signing you in…</p>
++        ) : (
++          <>
++            <h1 className="text-lg font-semibold text-black dark:text-zinc-50">
++              This link doesn&apos;t work
++            </h1>
++            <p className="text-sm text-zinc-600 dark:text-zinc-400">
++              It may have expired or already been used. Magic links are valid for 15 minutes and
++              can only be used once.
++            </p>
++            <Link href="/signin" className="text-sm font-medium underline">
++              Back to sign in
++            </Link>
++          </>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 4cd578f..bedb6b7 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -39,6 +39,9 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
+                 <Link href="/dashboard" className="font-medium">
+                   Dashboard
+                 </Link>
++                <Link href="/account" className="font-medium">
++                  Account
++                </Link>
+                 <span className="text-zinc-500">{session.user.email}</span>
+                 <SignOutButton />
+               </>
+diff --git a/src/app/signin/page.tsx b/src/app/signin/page.tsx
+index 6aa64f2..7edab1c 100644
+--- a/src/app/signin/page.tsx
++++ b/src/app/signin/page.tsx
+@@ -22,6 +22,33 @@ function SignInForm() {
+   const [error, setError] = useState<string | null>(null);
+   const [loading, setLoading] = useState(false);
+ 
++  const [magicEmail, setMagicEmail] = useState("");
++  const [magicStatus, setMagicStatus] = useState<"idle" | "sending" | "sent">("idle");
++  const [magicError, setMagicError] = useState<string | null>(null);
++  const [magicDevLink, setMagicDevLink] = useState<string | null>(null);
++
++  async function handleMagicLinkRequest(e: FormEvent) {
++    e.preventDefault();
++    setMagicError(null);
++    setMagicStatus("sending");
++
++    const res = await fetch("/api/auth/magic-link", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ email: magicEmail }),
++    });
++    const data = await res.json().catch(() => null);
++
++    if (!res.ok) {
++      setMagicError(data?.error ?? "Something went wrong.");
++      setMagicStatus("idle");
++      return;
++    }
++
++    setMagicDevLink(data?.devLink ?? null);
++    setMagicStatus("sent");
++  }
++
+   async function handleCredentialsSignIn(e: FormEvent) {
+     e.preventDefault();
+     setError(null);
+@@ -111,6 +138,62 @@ function SignInForm() {
+             {loading ? "Signing in…" : "Sign in"}
+           </button>
+         </form>
++
++        <div className="flex items-center gap-3 text-xs uppercase text-zinc-400">
++          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
++          or
++          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
++        </div>
++
++        {magicStatus === "sent" ? (
++          <div className="space-y-2 text-sm">
++            <p className="text-zinc-600 dark:text-zinc-400">
++              Check <span className="font-medium text-black dark:text-zinc-50">{magicEmail}</span>{" "}
++              for a sign-in link. It expires in 15 minutes.
++            </p>
++            {magicDevLink && (
++              <p className="break-all rounded-md border border-dashed border-black/[.15] p-2 text-xs text-zinc-500 dark:border-white/[.15]">
++                Dev mode, no RESEND_API_KEY configured — link:{" "}
++                <a href={magicDevLink} className="underline">
++                  {magicDevLink}
++                </a>
++              </p>
++            )}
++            <button
++              type="button"
++              onClick={() => setMagicStatus("idle")}
++              className="text-sm font-medium underline"
++            >
++              Use a different email
++            </button>
++          </div>
++        ) : (
++          <form onSubmit={handleMagicLinkRequest} className="space-y-4">
++            <div className="space-y-1">
++              <label htmlFor="magic-email" className="text-sm font-medium">
++                Email me a sign-in link
++              </label>
++              <input
++                id="magic-email"
++                type="email"
++                required
++                value={magicEmail}
++                onChange={(e) => setMagicEmail(e.target.value)}
++                className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
++              />
++            </div>
++
++            {magicError && <p className="text-sm text-red-600 dark:text-red-400">{magicError}</p>}
++
++            <button
++              type="submit"
++              disabled={magicStatus === "sending"}
++              className="flex h-11 w-full items-center justify-center rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-60 dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++            >
++              {magicStatus === "sending" ? "Sending…" : "Send magic link"}
++            </button>
++          </form>
++        )}
+       </div>
+     </div>
+   );
+diff --git a/src/auth.ts b/src/auth.ts
+index f971895..249e8f5 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1,7 +1,8 @@
+ import NextAuth from "next-auth";
+ import Credentials from "next-auth/providers/credentials";
+ import Google from "next-auth/providers/google";
+-import { findOrCreateOAuthUser, verifyPassword } from "@/lib/users";
++import { findOrCreateOAuthUser, getUserByEmail, verifyPassword } from "@/lib/users";
++import { consumeMagicLinkToken } from "@/lib/magic-links";
+ 
+ export const { handlers, signIn, signOut, auth } = NextAuth({
+   providers: [
+@@ -10,6 +11,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
+       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+     }),
+     Credentials({
++      id: "credentials",
+       name: "Email and password",
+       credentials: {
+         email: { label: "Email", type: "email" },
+@@ -26,6 +28,28 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
+         return { id: user.id, email: user.email, name: user.name };
+       },
+     }),
++    Credentials({
++      // A second, separate Credentials provider rather than NextAuth's
++      // built-in Email provider: that one requires a database Adapter to
++      // persist verification tokens, which this app (in-memory user store,
++      // JWT sessions) doesn't have. The token itself is minted and emailed
++      // by /api/auth/magic-link, then redeemed here exactly like a password.
++      id: "magic-link",
++      name: "Magic Link",
++      credentials: {
++        token: { label: "Token", type: "text" },
++      },
++      authorize: async (credentials) => {
++        const token = credentials?.token;
++        if (typeof token !== "string" || !token) return null;
++
++        const email = consumeMagicLinkToken(token);
++        if (!email) return null;
++
++        const user = await findOrCreateOAuthUser({ email, name: email.split("@")[0] });
++        return { id: user.id, email: user.email, name: user.name };
++      },
++    }),
+   ],
+   session: { strategy: "jwt" },
+   pages: {
+@@ -42,5 +66,33 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
+       }
+       return true;
+     },
++    async jwt({ token, user }) {
++      if (user?.email) {
++        // Fresh sign-in (any provider): stamp the token with the account's
++        // current session version so later requests can detect a revocation.
++        const dbUser = await getUserByEmail(user.email);
++        token.sessionVersion = dbUser?.sessionVersion;
++        return token;
++      }
++
++      if (typeof token.email !== "string") return token;
++
++      // Every subsequent request: if the account's session version has moved
++      // on — from "sign out of all devices", a password change, or the
++      // account being deleted — invalidate this token by dropping the
++      // version. The session callback below turns that into a logged-out
++      // session.
++      const dbUser = await getUserByEmail(token.email);
++      if (!dbUser || dbUser.sessionVersion !== token.sessionVersion) {
++        token.sessionVersion = undefined;
++      }
++      return token;
++    },
++    async session({ session, token }) {
++      if (!token.sessionVersion) {
++        return { ...session, user: undefined };
++      }
++      return session;
++    },
+   },
+ });
+diff --git a/src/lib/email.ts b/src/lib/email.ts
+new file mode 100644
+index 0000000..8490d25
+--- /dev/null
++++ b/src/lib/email.ts
+@@ -0,0 +1,43 @@
++// Minimal Resend integration for transactional email (currently just magic
++// links). Uses a plain fetch call against Resend's REST API rather than
++// pulling in their SDK — one endpoint doesn't need a dependency.
++//
++// Without a real RESEND_API_KEY configured, sending is skipped and the
++// email's content is logged instead, so magic-link sign-in works out of the
++// box in local dev without any credentials.
++
++const RESEND_API_URL = "https://api.resend.com/emails";
++
++function isConfigured(): boolean {
++  const key = process.env.RESEND_API_KEY;
++  return typeof key === "string" && key.length > 0 && !key.startsWith("placeholder");
++}
++
++export async function sendMagicLinkEmail(email: string, url: string): Promise<void> {
++  if (!isConfigured()) {
++    console.log(`[email:dev] Magic link for ${email}: ${url}`);
++    return;
++  }
++
++  const from = process.env.EMAIL_FROM || "Notely <onboarding@resend.dev>";
++
++  const res = await fetch(RESEND_API_URL, {
++    method: "POST",
++    headers: {
++      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
++      "Content-Type": "application/json",
++    },
++    body: JSON.stringify({
++      from,
++      to: email,
++      subject: "Sign in to Notely",
++      html: `<p>Click below to sign in to Notely. This link expires in 15 minutes and can only be used once.</p><p><a href="${url}">Sign in to Notely</a></p><p>If you didn't request this, you can ignore this email.</p>`,
++      text: `Sign in to Notely: ${url}\n\nThis link expires in 15 minutes and can only be used once. If you didn't request this, you can ignore this email.`,
++    }),
++  });
++
++  if (!res.ok) {
++    const body = await res.text().catch(() => "");
++    throw new Error(`Failed to send magic-link email (${res.status}): ${body}`);
++  }
++}
+diff --git a/src/lib/magic-links.ts b/src/lib/magic-links.ts
+new file mode 100644
+index 0000000..939e090
+--- /dev/null
++++ b/src/lib/magic-links.ts
+@@ -0,0 +1,45 @@
++import { randomBytes } from "node:crypto";
++
++type MagicLinkToken = {
++  email: string;
++  expiresAt: number;
++};
++
++const TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
++
++// Same globalThis-pinning trick as src/lib/users.ts — Next.js can load this
++// module more than once per process, and a token issued from one copy must
++// still be readable from another.
++const globalForMagicLinks = globalThis as unknown as {
++  __notelyMagicLinks?: Map<string, MagicLinkToken>;
++};
++
++const tokens: Map<string, MagicLinkToken> =
++  globalForMagicLinks.__notelyMagicLinks ?? (globalForMagicLinks.__notelyMagicLinks = new Map());
++
++function sweepExpired(now: number) {
++  for (const [token, entry] of tokens) {
++    if (entry.expiresAt <= now) tokens.delete(token);
++  }
++}
++
++// Issues a one-time sign-in token for the given email. Doesn't check whether
++// the email belongs to an existing account — passwordless sign-in provisions
++// one on first use, same as Google sign-in does.
++export function createMagicLinkToken(email: string): string {
++  const now = Date.now();
++  sweepExpired(now);
++  const token = randomBytes(32).toString("base64url");
++  tokens.set(token, { email: email.toLowerCase(), expiresAt: now + TOKEN_TTL_MS });
++  return token;
++}
++
++// Validates and burns a token. Returns the associated email, or null if the
++// token is unknown, expired, or already used.
++export function consumeMagicLinkToken(token: string): string | null {
++  const entry = tokens.get(token);
++  tokens.delete(token); // single use, whether or not it was valid
++  if (!entry) return null;
++  if (entry.expiresAt <= Date.now()) return null;
++  return entry.email;
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index e54946a..46843f8 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -5,8 +5,13 @@ export type User = {
+   email: string;
+   name: string;
+   createdAt: string;
+-  // Absent for users who only ever signed in via an OAuth provider (e.g. Google).
++  // Absent for users who only ever signed in via an OAuth provider (e.g. Google)
++  // or a magic link.
+   passwordHash?: string;
++  // Bumped by "sign out of all devices" (and whenever the password changes).
++  // Every JWT carries the version it was issued under; auth.ts rejects a
++  // session whose version doesn't match the user's current one.
++  sessionVersion: number;
+ };
+ 
+ // Next.js (Turbopack, in both dev and prod) can load this module more than once —
+@@ -19,8 +24,8 @@ const globalForUsers = globalThis as unknown as { __notelyUsers?: User[] };
+ const users: User[] =
+   globalForUsers.__notelyUsers ??
+   (globalForUsers.__notelyUsers = [
+-    { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-    { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++    { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04", sessionVersion: 1 },
++    { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11", sessionVersion: 1 },
+   ]);
+ 
+ export async function listUsers(): Promise<User[]> {
+@@ -64,6 +69,7 @@ export async function createUser({
+     name,
+     createdAt: today(),
+     passwordHash,
++    sessionVersion: 1,
+   };
+   users.push(user);
+   return user;
+@@ -80,9 +86,10 @@ export async function verifyPassword(
+   return valid ? user : undefined;
+ }
+ 
+-// Used by OAuth providers (e.g. Google): find the existing account by email, or
+-// provision one on first sign-in. OAuth-only users have no passwordHash, so they
+-// can't also be logged into via the credentials form.
++// Used by OAuth providers (e.g. Google) and magic-link sign-in: find the
++// existing account by email, or provision one on first sign-in. Users
++// provisioned this way have no passwordHash, so they can't also be logged
++// into via the credentials form until they set one from /account.
+ export async function findOrCreateOAuthUser({
+   email,
+   name,
+@@ -92,11 +99,38 @@ export async function findOrCreateOAuthUser({
+ }): Promise<User> {
+   const existing = await getUserByEmail(email);
+   if (existing) return existing;
+-  const user: User = { id: nextId(), email, name, createdAt: today() };
++  const user: User = { id: nextId(), email, name, createdAt: today(), sessionVersion: 1 };
+   users.push(user);
+   return user;
+ }
+ 
++// Used by the "change password" form on /account. Requires the caller to have
++// already verified the current password (if any).
++export async function setUserPassword(email: string, newPassword: string): Promise<void> {
++  const user = await getUserByEmail(email);
++  if (!user) throw new Error("No such user");
++  user.passwordHash = await bcrypt.hash(newPassword, 10);
++}
++
++// Used by "sign out of all devices" and by setUserPassword's callers after a
++// password change. Every outstanding JWT was stamped with the version at the
++// time it was issued; bumping this makes auth.ts's jwt callback reject them
++// all on their next use, forcing re-authentication everywhere.
++export async function bumpSessionVersion(email: string): Promise<void> {
++  const user = await getUserByEmail(email);
++  if (!user) return;
++  user.sessionVersion += 1;
++}
++
++// Used by the "delete account" flow on /account.
++export async function deleteUserByEmail(email: string): Promise<boolean> {
++  const normalized = email.toLowerCase();
++  const index = users.findIndex((u) => u.email.toLowerCase() === normalized);
++  if (index === -1) return false;
++  users.splice(index, 1);
++  return true;
++}
++
+ export async function getCurrentUser(): Promise<User | undefined> {
+   // Imported lazily to avoid a module cycle: src/auth.ts imports from this file
+   // (verifyPassword, findOrCreateOAuthUser) to implement its providers.
+diff --git a/src/proxy.ts b/src/proxy.ts
+index 4871999..5b9c9be 100644
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
+ import { auth } from "@/auth";
+ 
+ export default auth((req) => {
+-  const isLoggedIn = !!req.auth;
++  // req.auth is truthy even for a revoked session (auth.ts's session
++  // callback blanks `user` but still returns an object), so check for the
++  // user explicitly.
++  const isLoggedIn = !!req.auth?.user;
+ 
+   if (!isLoggedIn) {
+     const signInUrl = new URL("/signin", req.nextUrl.origin);
+@@ -12,5 +15,5 @@ export default auth((req) => {
+ });
+ 
+ export const config = {
+-  matcher: ["/dashboard/:path*"],
++  matcher: ["/dashboard/:path*", "/account/:path*"],
+ };
+diff --git a/src/types/next-auth.d.ts b/src/types/next-auth.d.ts
+new file mode 100644
+index 0000000..ce161d1
+--- /dev/null
++++ b/src/types/next-auth.d.ts
+@@ -0,0 +1,17 @@
++import type { DefaultSession } from "next-auth";
++
++// The session/jwt callbacks in src/auth.ts blank out `user` and drop
++// `sessionVersion` to invalidate a token (password change, account deletion,
++// or "sign out of all devices"). Reflect that in the types instead of
++// casting past them at every call site.
++declare module "next-auth" {
++  interface Session {
++    user?: DefaultSession["user"];
++  }
++}
++
++declare module "next-auth/jwt" {
++  interface JWT {
++    sessionVersion?: number;
++  }
++}

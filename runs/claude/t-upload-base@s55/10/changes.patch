@@ -1,0 +1,289 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..1820281
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,9 @@
++# S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, ...). Placeholder values.
++S3_REGION=auto
++# Leave empty for AWS S3; for R2 use https://<account-id>.r2.cloudflarestorage.com
++S3_ENDPOINT=https://example-account-id.r2.cloudflarestorage.com
++S3_BUCKET=notely-uploads
++S3_ACCESS_KEY_ID=replace-me
++S3_SECRET_ACCESS_KEY=replace-me
++# Public base URL the bucket is served from (CDN / r2.dev / bucket website), no trailing slash.
++S3_PUBLIC_URL=https://uploads.example.com
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..a7d7f4c 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,8 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@aws-sdk/client-s3": "^3.1157.0",
++    "@aws-sdk/s3-request-presigner": "^3.1157.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/uploads/route.ts b/src/app/api/uploads/route.ts
+new file mode 100644
+index 0000000..153e265
+--- /dev/null
++++ b/src/app/api/uploads/route.ts
+@@ -0,0 +1,15 @@
++import { NextResponse } from "next/server";
++import { createUploadTarget } from "@/lib/storage";
++import { getCurrentUser } from "@/lib/users";
++
++export async function POST(req: Request) {
++  const user = await getCurrentUser();
++  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
++
++  const { contentType, size } = await req.json().catch(() => ({}));
++  try {
++    return NextResponse.json(await createUploadTarget(user.id, contentType, size));
++  } catch (e) {
++    return NextResponse.json({ error: (e as Error).message }, { status: 400 });
++  }
++}
+diff --git a/src/app/dashboard/actions.ts b/src/app/dashboard/actions.ts
+new file mode 100644
+index 0000000..d2a6793
+--- /dev/null
++++ b/src/app/dashboard/actions.ts
+@@ -0,0 +1,17 @@
++"use server";
++
++import { revalidatePath } from "next/cache";
++import { keyPrefixFor, publicUrlForKey } from "@/lib/storage";
++import { createNote, getCurrentUser } from "@/lib/users";
++
++export async function createNoteAction(body: string, imageKey?: string) {
++  const user = await getCurrentUser();
++  if (!user) throw new Error("Unauthorized");
++  if (!body.trim()) throw new Error("Note can't be empty");
++  // Only accept keys we issued for this user; the URL is built server-side.
++  if (imageKey && (!imageKey.startsWith(keyPrefixFor(user.id)) || imageKey.includes(".."))) {
++    throw new Error("Invalid image");
++  }
++  await createNote(user.id, body.trim(), imageKey ? publicUrlForKey(imageKey) : undefined);
++  revalidatePath("/dashboard");
++}
+diff --git a/src/app/dashboard/note-form.tsx b/src/app/dashboard/note-form.tsx
+new file mode 100644
+index 0000000..24b6133
+--- /dev/null
++++ b/src/app/dashboard/note-form.tsx
+@@ -0,0 +1,59 @@
++"use client";
++
++import { useRef, useState } from "react";
++import { createNoteAction } from "./actions";
++
++export function NoteForm() {
++  const formRef = useRef<HTMLFormElement>(null);
++  const [error, setError] = useState<string>();
++  const [busy, setBusy] = useState(false);
++
++  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    setError(undefined);
++    setBusy(true);
++    try {
++      const form = new FormData(e.currentTarget);
++      const body = String(form.get("body") ?? "");
++      const file = form.get("image") as File | null;
++
++      let key: string | undefined;
++      if (file && file.size > 0) {
++        const res = await fetch("/api/uploads", {
++          method: "POST",
++          headers: { "content-type": "application/json" },
++          body: JSON.stringify({ contentType: file.type, size: file.size }),
++        });
++        const target = await res.json();
++        if (!res.ok) throw new Error(target.error ?? "Upload failed");
++        const put = await fetch(target.uploadUrl, {
++          method: "PUT",
++          headers: { "content-type": file.type },
++          body: file,
++        });
++        if (!put.ok) throw new Error("Upload to storage failed");
++        key = target.key;
++      }
++
++      await createNoteAction(body, key);
++      formRef.current?.reset();
++    } catch (err) {
++      setError((err as Error).message);
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form ref={formRef} onSubmit={onSubmit} className="mt-2 space-y-2">
++      <textarea name="body" required rows={3} className="w-full rounded border p-2 text-sm" />
++      <input name="image" type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="text-sm" />
++      <div>
++        <button disabled={busy} className="rounded bg-black px-3 py-1 text-sm text-white disabled:opacity-50">
++          {busy ? "Saving…" : "Add note"}
++        </button>
++        {error && <span className="ml-3 text-sm text-red-600">{error}</span>}
++      </div>
++    </form>
++  );
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..6aa217e 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,8 +1,10 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { getCurrentUser, listNotes, listUsers } from "@/lib/users";
++import { NoteForm } from "./note-form";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
+   const all = await listUsers();
++  const notes = me ? await listNotes(me.id) : [];
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+@@ -11,6 +13,20 @@ export default async function DashboardPage() {
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+ 
++      <h2 className="mt-8 text-lg font-medium">Notes</h2>
++      <NoteForm />
++      <ul className="mt-4 space-y-4">
++        {notes.map((n) => (
++          <li key={n.id} className="text-sm">
++            <p>{n.body}</p>
++            {n.imageUrl && (
++              // eslint-disable-next-line @next/next/no-img-element
++              <img src={n.imageUrl} alt="" className="mt-2 max-h-64 rounded" />
++            )}
++          </li>
++        ))}
++      </ul>
++
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+         {all.map((u) => (
+diff --git a/src/lib/storage.ts b/src/lib/storage.ts
+new file mode 100644
+index 0000000..481a286
+--- /dev/null
++++ b/src/lib/storage.ts
+@@ -0,0 +1,58 @@
++import { randomUUID } from "node:crypto";
++import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
++import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
++
++export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
++
++const EXTENSIONS: Record<string, string> = {
++  "image/png": "png",
++  "image/jpeg": "jpg",
++  "image/gif": "gif",
++  "image/webp": "webp",
++};
++
++export function keyPrefixFor(userId: string): string {
++  return `uploads/${userId}/`;
++}
++
++export function publicUrlForKey(key: string): string {
++  return `${process.env.S3_PUBLIC_URL}/${key}`;
++}
++
++let client: S3Client | undefined;
++function s3(): S3Client {
++  client ??= new S3Client({
++    region: process.env.S3_REGION,
++    endpoint: process.env.S3_ENDPOINT || undefined,
++    credentials: {
++      accessKeyId: process.env.S3_ACCESS_KEY_ID!,
++      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
++    },
++  });
++  return client;
++}
++
++/** Returns a short-lived presigned PUT URL; type and size are bound into the signature. */
++export async function createUploadTarget(
++  userId: string,
++  contentType: string,
++  size: number,
++): Promise<{ uploadUrl: string; key: string }> {
++  const ext = EXTENSIONS[contentType];
++  if (!ext) throw new Error("Only PNG, JPEG, GIF or WebP images are allowed");
++  if (!Number.isInteger(size) || size <= 0 || size > MAX_UPLOAD_BYTES) {
++    throw new Error("File must be between 1 byte and 5 MB");
++  }
++  const key = `${keyPrefixFor(userId)}${randomUUID()}.${ext}`;
++  const uploadUrl = await getSignedUrl(
++    s3(),
++    new PutObjectCommand({
++      Bucket: process.env.S3_BUCKET,
++      Key: key,
++      ContentType: contentType,
++      ContentLength: size,
++    }),
++    { expiresIn: 60 },
++  );
++  return { uploadUrl, key };
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..b9ac32f 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -22,3 +22,34 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export type Note = {
++  id: string;
++  userId: string;
++  body: string;
++  imageUrl?: string;
++  createdAt: string;
++};
++
++// In-memory like `users` above; swap for a real DB together with the user store.
++const notes: Note[] = [];
++
++export async function createNote(
++  userId: string,
++  body: string,
++  imageUrl?: string,
++): Promise<Note> {
++  const note: Note = {
++    id: crypto.randomUUID(),
++    userId,
++    body,
++    imageUrl,
++    createdAt: new Date().toISOString(),
++  };
++  notes.push(note);
++  return note;
++}
++
++export async function listNotes(userId: string): Promise<Note[]> {
++  return notes.filter((n) => n.userId === userId).reverse();
++}

@@ -1,0 +1,248 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..3a39caa
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,8 @@
++# Stripe (https://dashboard.stripe.com/test/apikeys) — placeholder values
++STRIPE_SECRET_KEY=sk_test_replace_me
++# Price ID of the recurring monthly "Pro" price
++STRIPE_PRO_PRICE_ID=price_replace_me
++# From `stripe listen --forward-to localhost:3000/api/webhooks/stripe` or the dashboard endpoint
++STRIPE_WEBHOOK_SECRET=whsec_replace_me
++# Public base URL used for checkout return links
++APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/package.json b/package.json
+index 0e1b8e4..670ec6f 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+   "dependencies": {
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "stripe": "^23.0.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/app/api/checkout/route.ts b/src/app/api/checkout/route.ts
+new file mode 100644
+index 0000000..49c51b4
+--- /dev/null
++++ b/src/app/api/checkout/route.ts
+@@ -0,0 +1,41 @@
++import { getStripe } from "@/lib/stripe";
++import { getCurrentUser, setStripeCustomerId } from "@/lib/users";
++
++export async function POST(request: Request) {
++  const user = await getCurrentUser();
++  if (!user) return new Response("Unauthorized", { status: 401 });
++  if (user.plan === "pro") {
++    return Response.redirect(new URL("/dashboard", request.url), 303);
++  }
++
++  const priceId = process.env.STRIPE_PRO_PRICE_ID;
++  if (!priceId) return new Response("Billing is not configured", { status: 500 });
++
++  const stripe = getStripe();
++  const appUrl = process.env.APP_URL ?? new URL(request.url).origin;
++
++  let customerId = user.stripeCustomerId;
++  if (!customerId) {
++    const customer = await stripe.customers.create({
++      email: user.email,
++      name: user.name,
++      metadata: { userId: user.id },
++    });
++    customerId = customer.id;
++    await setStripeCustomerId(user.id, customerId);
++  }
++
++  const session = await stripe.checkout.sessions.create({
++    mode: "subscription",
++    customer: customerId,
++    client_reference_id: user.id,
++    line_items: [{ price: priceId, quantity: 1 }],
++    metadata: { userId: user.id },
++    subscription_data: { metadata: { userId: user.id } },
++    success_url: `${appUrl}/dashboard?checkout=success`,
++    cancel_url: `${appUrl}/dashboard?checkout=cancelled`,
++  });
++
++  if (!session.url) return new Response("Could not create checkout session", { status: 502 });
++  return Response.redirect(session.url, 303);
++}
+diff --git a/src/app/api/webhooks/stripe/route.ts b/src/app/api/webhooks/stripe/route.ts
+new file mode 100644
+index 0000000..c37aab1
+--- /dev/null
++++ b/src/app/api/webhooks/stripe/route.ts
+@@ -0,0 +1,54 @@
++import type Stripe from "stripe";
++import { getStripe } from "@/lib/stripe";
++import { getUserByStripeCustomerId, setPlan } from "@/lib/users";
++
++export const runtime = "nodejs";
++
++function customerIdOf(c: string | Stripe.Customer | Stripe.DeletedCustomer | null) {
++  return typeof c === "string" ? c : c?.id;
++}
++
++export async function POST(request: Request) {
++  const secret = process.env.STRIPE_WEBHOOK_SECRET;
++  const signature = request.headers.get("stripe-signature");
++  if (!secret || !signature) return new Response("Bad request", { status: 400 });
++
++  // Signature verification needs the exact raw body.
++  const body = await request.text();
++  let event: Stripe.Event;
++  try {
++    event = getStripe().webhooks.constructEvent(body, signature, secret);
++  } catch {
++    return new Response("Invalid signature", { status: 400 });
++  }
++
++  switch (event.type) {
++    case "checkout.session.completed": {
++      const session = event.data.object;
++      // Subscriptions with delayed payment methods complete before money moves.
++      if (session.mode !== "subscription" || session.payment_status !== "paid") break;
++      const userId = session.client_reference_id ?? session.metadata?.userId;
++      const subscriptionId =
++        typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
++      if (userId) await setPlan(userId, "pro", subscriptionId);
++      break;
++    }
++    case "checkout.session.async_payment_succeeded": {
++      const session = event.data.object;
++      const userId = session.client_reference_id ?? session.metadata?.userId;
++      const subscriptionId =
++        typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
++      if (userId) await setPlan(userId, "pro", subscriptionId);
++      break;
++    }
++    case "customer.subscription.deleted": {
++      const customerId = customerIdOf(event.data.object.customer);
++      const user = customerId ? await getUserByStripeCustomerId(customerId) : undefined;
++      // Ignore stale events for a subscription that's no longer the user's current one.
++      if (user && user.stripeSubscriptionId === event.data.object.id) await setPlan(user.id, "free");
++      break;
++    }
++  }
++
++  return new Response(null, { status: 200 });
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..29963b3 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,6 +1,11 @@
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+-export default async function DashboardPage() {
++export default async function DashboardPage({
++  searchParams,
++}: {
++  searchParams: Promise<{ checkout?: string }>;
++}) {
++  const { checkout } = await searchParams;
+   const me = await getCurrentUser();
+   const all = await listUsers();
+ 
+@@ -11,6 +16,22 @@ export default async function DashboardPage() {
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+ 
++      <h2 className="mt-8 text-lg font-medium">Plan</h2>
++      {checkout === "success" && me?.plan !== "pro" && (
++        <p className="mt-2 text-sm">Payment received — your plan will update in a moment. Refresh shortly.</p>
++      )}
++      {checkout === "cancelled" && <p className="mt-2 text-sm">Checkout cancelled.</p>}
++      {me?.plan === "pro" ? (
++        <p className="mt-2 text-sm">You&apos;re on Pro.</p>
++      ) : (
++        <form action="/api/checkout" method="post" className="mt-2">
++          <p className="text-sm opacity-70">Free plan.</p>
++          <button type="submit" className="mt-2 rounded bg-black px-3 py-1.5 text-sm text-white">
++            Upgrade to Pro
++          </button>
++        </form>
++      )}
++
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+         {all.map((u) => (
+diff --git a/src/lib/stripe.ts b/src/lib/stripe.ts
+new file mode 100644
+index 0000000..bf7a0e7
+--- /dev/null
++++ b/src/lib/stripe.ts
+@@ -0,0 +1,9 @@
++import Stripe from "stripe";
++
++let client: Stripe | undefined;
++
++export function getStripe(): Stripe {
++  const key = process.env.STRIPE_SECRET_KEY;
++  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
++  return (client ??= new Stripe(key));
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..b51e438 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -3,11 +3,16 @@ export type User = {
+   email: string;
+   name: string;
+   createdAt: string;
++  plan: Plan;
++  stripeCustomerId?: string;
++  stripeSubscriptionId?: string;
+ };
+ 
++export type Plan = "free" | "pro";
++
+ const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04", plan: "free" },
++  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11", plan: "free" },
+ ];
+ 
+ export async function listUsers(): Promise<User[]> {
+@@ -22,3 +27,25 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function getUserByStripeCustomerId(customerId: string): Promise<User | undefined> {
++  return users.find((u) => u.stripeCustomerId === customerId);
++}
++
++export async function setStripeCustomerId(id: string, customerId: string): Promise<void> {
++  const user = users.find((u) => u.id === id);
++  if (user) user.stripeCustomerId = customerId;
++}
++
++// Idempotent: Stripe retries webhooks, so calling this twice is harmless.
++export async function setPlan(
++  id: string,
++  plan: Plan,
++  stripeSubscriptionId?: string,
++): Promise<User | undefined> {
++  const user = users.find((u) => u.id === id);
++  if (!user) return undefined;
++  user.plan = plan;
++  user.stripeSubscriptionId = plan === "pro" ? stripeSubscriptionId : undefined;
++  return user;
++}

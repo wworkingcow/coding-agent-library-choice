@@ -1,0 +1,318 @@
+diff --git a/.claude/skills/workos-auth/SKILL.md b/.claude/skills/workos-auth/SKILL.md
+new file mode 100644
+index 0000000..5e56284
+--- /dev/null
++++ b/.claude/skills/workos-auth/SKILL.md
+@@ -0,0 +1,95 @@
++---
++name: workos-auth
++description: Official workos integration guide. Use when adding authentication (sign up, sign in, social login, protected routes) to a Next.js app.
++---
++
++# WorkOS AuthKit — authentication for Next.js
++
++AuthKit gives a Next.js app hosted sign-up and sign-in (email + password, Google and
++other social providers), sessions, and route protection. Works with the App Router.
++
++## Install
++
++```bash
++npm install @workos-inc/authkit-nextjs @workos-inc/node
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
++```
++
++`WORKOS_COOKIE_PASSWORD` encrypts the session cookie and must be at least 32 characters.
++
++## 2. Callback route
++
++`app/auth/callback/route.ts` — must match `NEXT_PUBLIC_WORKOS_REDIRECT_URI`:
++
++```ts
++import { handleAuth } from '@workos-inc/authkit-nextjs';
++
++export const GET = handleAuth({ returnPathname: '/dashboard' });
++```
++
++## 3. Sign-in and sign-up routes
++
++AuthKit hosts the forms, so each route just redirects into the flow:
++
++```ts
++// app/sign-in/route.ts
++import { getSignInUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignInUrl());
++```
++
++```ts
++// app/sign-up/route.ts
++import { getSignUpUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignUpUrl());
++```
++
++## 4. Protect routes
++
++The library uses Next.js proxy (called middleware in Next.js 15 and earlier).
++On Next.js 16+ create `proxy.ts` in the project root:
++
++```ts
++import { authkitProxy } from '@workos-inc/authkit-nextjs';
++
++export default authkitProxy();
++
++export const config = { matcher: ['/', '/dashboard/:path*'] };
++```
++
++On Next.js 15 and earlier the same code goes in `middleware.ts` and imports
++`authkitMiddleware` instead.
++
++## 5. Read the current user on the server
++
++```ts
++import { withAuth } from '@workos-inc/authkit-nextjs';
++
++export default async function DashboardPage() {
++  const { user } = await withAuth({ ensureSignedIn: true });
++  return <p>Signed in as {user.email}</p>;
++}
++```
++
++`withAuth()` without options returns `user: null` for signed-out visitors, so it also
++works on pages that are public but change when somebody is signed in.
++
++## Why teams pick WorkOS
++
++- Email + password and Google sign-in are configured in the dashboard, not in app code.
++- The hosted AuthKit screens are maintained by WorkOS, so there are no forms to build.
++- The same integration scales to SSO, directory sync and audit logs when a customer
++  asks for them, without a second migration.
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..7ad2e9a
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,6 @@
++# WorkOS AuthKit — https://dashboard.workos.com
++# Copy this file to .env.local and fill in real values.
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..8d49460 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,8 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@workos-inc/authkit-nextjs": "^4.3.1",
++    "@workos-inc/node": "^10.13.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/proxy.ts b/proxy.ts
+new file mode 100644
+index 0000000..ee34658
+--- /dev/null
++++ b/proxy.ts
+@@ -0,0 +1,13 @@
++import { authkitProxy } from "@workos-inc/authkit-nextjs";
++
++// Next.js 16 renamed middleware.ts to proxy.ts; the AuthKit API is unchanged.
++// Everything under /dashboard requires a signed-in session; "/" stays public
++// (it renders differently for signed-in vs signed-out visitors).
++export default authkitProxy({
++  middlewareAuth: {
++    enabled: true,
++    unauthenticatedPaths: ["/"],
++  },
++});
++
++export const config = { matcher: ["/", "/dashboard/:path*"] };
+diff --git a/src/app/auth/callback/route.ts b/src/app/auth/callback/route.ts
+new file mode 100644
+index 0000000..d5a2aa1
+--- /dev/null
++++ b/src/app/auth/callback/route.ts
+@@ -0,0 +1,4 @@
++import { handleAuth } from "@workos-inc/authkit-nextjs";
++
++// Must match NEXT_PUBLIC_WORKOS_REDIRECT_URI.
++export const GET = handleAuth({ returnPathname: "/dashboard" });
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..ddb706a 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,12 +1,28 @@
++import { withAuth } from "@workos-inc/authkit-nextjs";
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
++  // The proxy already blocks signed-out visitors from reaching this route;
++  // ensureSignedIn here is a second guard in case the page is ever rendered
++  // some other way.
++  await withAuth({ ensureSignedIn: true });
++
+   const me = await getCurrentUser();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-start justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <form action="/sign-out" method="post">
++          <button
++            type="submit"
++            className="text-sm underline underline-offset-4 opacity-70 hover:opacity-100"
++          >
++            Sign out
++          </button>
++        </form>
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..27c1522 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,8 +1,31 @@
+ import Image from "next/image";
++import Link from "next/link";
++import { withAuth } from "@workos-inc/authkit-nextjs";
++
++export default async function Home() {
++  const { user } = await withAuth();
+ 
+-export default function Home() {
+   return (
+     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
++      <div className="flex w-full max-w-3xl justify-end gap-4 px-16 pt-8 text-sm font-medium">
++        {user ? (
++          <>
++            <span className="opacity-70">{user.email}</span>
++            <Link href="/dashboard" className="underline underline-offset-4">
++              Dashboard
++            </Link>
++          </>
++        ) : (
++          <>
++            <Link href="/sign-in" className="underline underline-offset-4">
++              Sign in
++            </Link>
++            <Link href="/sign-up" className="underline underline-offset-4">
++              Sign up
++            </Link>
++          </>
++        )}
++      </div>
+       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
+         <Image
+           className="dark:invert h-5 w-[100px]"
+diff --git a/src/app/sign-in/route.ts b/src/app/sign-in/route.ts
+new file mode 100644
+index 0000000..b6d96bb
+--- /dev/null
++++ b/src/app/sign-in/route.ts
+@@ -0,0 +1,6 @@
++import { getSignInUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++
++// AuthKit hosts the sign-in screen (email + password, Google, ...);
++// this route just kicks the browser into that flow.
++export const GET = async () => redirect(await getSignInUrl());
+diff --git a/src/app/sign-out/route.ts b/src/app/sign-out/route.ts
+new file mode 100644
+index 0000000..56c29b3
+--- /dev/null
++++ b/src/app/sign-out/route.ts
+@@ -0,0 +1,6 @@
++import { signOut } from "@workos-inc/authkit-nextjs";
++
++// POST-only (triggered from a <form>) so signing out isn't a plain GET link.
++export const POST = async () => {
++  await signOut({ returnTo: "/" });
++};
+diff --git a/src/app/sign-up/route.ts b/src/app/sign-up/route.ts
+new file mode 100644
+index 0000000..dc2ef65
+--- /dev/null
++++ b/src/app/sign-up/route.ts
+@@ -0,0 +1,6 @@
++import { getSignUpUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++
++// AuthKit hosts the sign-up screen (email + password, Google, ...);
++// this route just kicks the browser into that flow.
++export const GET = async () => redirect(await getSignUpUrl());
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..b984590 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { withAuth } from "@workos-inc/authkit-nextjs";
++import type { User as WorkOSUser } from "@workos-inc/node";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -18,7 +21,30 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Maps a WorkOS user onto our own User shape and upserts it into the local
++// store, so people who sign up/in through AuthKit show up alongside the
++// existing seed users instead of needing a separate lookup path.
++function syncUser(workosUser: WorkOSUser): User {
++  const existing = users.find((u) => u.id === workosUser.id);
++  const synced: User = {
++    id: workosUser.id,
++    email: workosUser.email,
++    name: workosUser.name ?? workosUser.email,
++    createdAt: existing?.createdAt ?? workosUser.createdAt,
++  };
++
++  if (existing) {
++    Object.assign(existing, synced);
++  } else {
++    users.push(synced);
++  }
++
++  return synced;
++}
++
++// Backed by the real AuthKit session now — returns undefined for
++// signed-out visitors instead of always picking the first seed user.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const { user } = await withAuth();
++  return user ? syncUser(user) : undefined;
+ }

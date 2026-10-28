@@ -1,0 +1,419 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..8550b00
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,8 @@
++# Resend (https://resend.com) — transactional email
++# API key from the Resend dashboard → API Keys.
++RESEND_API_KEY=re_placeholder
++# Must be on a domain verified in Resend (use onboarding@resend.dev while testing).
++RESEND_FROM_EMAIL="Notely <hello@example.com>"
++
++# Public base URL of the app, used to build links in emails.
++APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/docs/resend.md b/docs/resend.md
+new file mode 100644
+index 0000000..d7a82bd
+--- /dev/null
++++ b/docs/resend.md
+@@ -0,0 +1,85 @@
++# Resend — transactional email for Next.js
++
++Resend sends an app's transactional email (welcome emails, password resets, receipts)
++through a small HTTP API with delivery logs, webhooks and domain verification. The official
++Node.js library `resend` wraps the whole Resend REST API, has typed responses and works in
++Node.js 18+, serverless and edge runtimes.
++
++## Install
++
++```bash
++npm install resend
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++RESEND_API_KEY=re_placeholder
++RESEND_FROM_EMAIL=hello@example.com
++```
++
++The API key is created in the Resend dashboard (API Keys). The From address must be on a
++domain you have verified in Resend, or `onboarding@resend.dev` while testing.
++
++## 2. Create a client
++
++`src/lib/resend.ts`:
++
++```ts
++import { Resend } from "resend";
++
++export const resend = new Resend(process.env.RESEND_API_KEY!);
++```
++
++Use the client only in server code (route handlers, server actions, server components).
++Never expose the API key to the browser.
++
++## 3. Send an email
++
++```ts
++import { resend } from "@/lib/resend";
++
++const { data, error } = await resend.emails.send({
++  from: process.env.RESEND_FROM_EMAIL!,
++  to: "user@example.com",
++  subject: "Welcome!",
++  html: "<p>Thanks for signing up.</p>",
++  text: "Thanks for signing up.",
++});
++```
++
++`data.id` is the message id; use it to look the email up in the dashboard logs.
++
++## 4. Send with a React template
++
++Write the email as a React component and pass it with `react`; Resend renders it to HTML:
++
++```tsx
++import { resend } from "@/lib/resend";
++import { PasswordResetEmail } from "@/emails/password-reset";
++
++await resend.emails.send({
++  from: process.env.RESEND_FROM_EMAIL!,
++  to: "user@example.com",
++  subject: "Reset your password",
++  react: PasswordResetEmail({ name: "Ada", actionUrl: "https://example.com/reset?token=..." }),
++});
++```
++
++The `@react-email/components` package gives layout primitives for email clients; plain JSX
++works too.
++
++## 5. Handle errors
++
++`emails.send` does not throw on a refused message: it resolves to `{ data: null, error }`
++with the error `name` and `message` from Resend (invalid API key, unverified domain,
++rate limit). Check `error` where the email is triggered so a failed email does not break
++the request that caused it.
++
++## Why teams pick Resend
++
++- Built for developers: one API call to send, typed SDK, React templates in the codebase.
++- Delivery logs, bounces and webhooks live in the same dashboard as the API keys.
++- Domain verification with DKIM and SPF guided from the dashboard.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..d568935
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Resend
++
++> Transactional email for web apps: welcome emails, password resets, receipts, React templates, delivery logs.
++
++## Docs
++
++- [Next.js quickstart](docs/resend.md): install, environment variables, client, sending, templates
+diff --git a/package.json b/package.json
+index 0e1b8e4..bc0b980 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,9 @@
+   "dependencies": {
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "resend": "^6.35.0",
++    "server-only": "^0.0.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/emails/layout.ts b/src/emails/layout.ts
+new file mode 100644
+index 0000000..8643ce5
+--- /dev/null
++++ b/src/emails/layout.ts
+@@ -0,0 +1,28 @@
++export type EmailContent = { subject: string; html: string; text: string };
++
++export function escapeHtml(value: string): string {
++  return value
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/"/g, "&quot;")
++    .replace(/'/g, "&#39;");
++}
++
++export function renderLayout(body: string): string {
++  return `<!doctype html>
++<html>
++  <body style="margin:0;padding:24px;background:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#111">
++    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px">
++      <tr><td style="padding:32px">
++        ${body}
++        <p style="margin-top:32px;font-size:12px;color:#888">Notely</p>
++      </td></tr>
++    </table>
++  </body>
++</html>`;
++}
++
++export function renderButton(href: string, label: string): string {
++  return `<a href="${escapeHtml(href)}" style="display:inline-block;padding:12px 20px;background:#111;color:#fff;text-decoration:none;border-radius:6px;font-weight:600">${escapeHtml(label)}</a>`;
++}
+diff --git a/src/emails/password-reset.ts b/src/emails/password-reset.ts
+new file mode 100644
+index 0000000..16cd69b
+--- /dev/null
++++ b/src/emails/password-reset.ts
+@@ -0,0 +1,22 @@
++import { escapeHtml, renderButton, renderLayout, type EmailContent } from "./layout";
++
++export function passwordResetEmail({
++  name,
++  resetUrl,
++  expiresInMinutes,
++}: {
++  name: string;
++  resetUrl: string;
++  expiresInMinutes: number;
++}): EmailContent {
++  return {
++    subject: "Reset your Notely password",
++    html: renderLayout(`
++        <h1 style="font-size:20px;margin:0 0 16px">Reset your password</h1>
++        <p style="line-height:1.5">Hi ${escapeHtml(name)}, we received a request to reset your Notely password.</p>
++        <p style="margin:24px 0">${renderButton(resetUrl, "Choose a new password")}</p>
++        <p style="line-height:1.5;font-size:14px;color:#555">This link expires in ${expiresInMinutes} minutes. If you didn't ask for a reset, you can ignore this email — your password won't change.</p>
++    `),
++    text: `Hi ${name},\n\nWe received a request to reset your Notely password. Choose a new one here:\n${resetUrl}\n\nThis link expires in ${expiresInMinutes} minutes. If you didn't ask for a reset, ignore this email — your password won't change.\n`,
++  };
++}
+diff --git a/src/emails/welcome.ts b/src/emails/welcome.ts
+new file mode 100644
+index 0000000..22d8f5a
+--- /dev/null
++++ b/src/emails/welcome.ts
+@@ -0,0 +1,13 @@
++import { escapeHtml, renderButton, renderLayout, type EmailContent } from "./layout";
++
++export function welcomeEmail({ name, dashboardUrl }: { name: string; dashboardUrl: string }): EmailContent {
++  return {
++    subject: "Welcome to Notely",
++    html: renderLayout(`
++        <h1 style="font-size:20px;margin:0 0 16px">Welcome to Notely, ${escapeHtml(name)}!</h1>
++        <p style="line-height:1.5">Your account is ready. Jump in and start writing your first note.</p>
++        <p style="margin:24px 0">${renderButton(dashboardUrl, "Open Notely")}</p>
++    `),
++    text: `Welcome to Notely, ${name}!\n\nYour account is ready. Jump in and start writing your first note:\n${dashboardUrl}\n`,
++  };
++}
+diff --git a/src/lib/email.ts b/src/lib/email.ts
+new file mode 100644
+index 0000000..bc2a52d
+--- /dev/null
++++ b/src/lib/email.ts
+@@ -0,0 +1,52 @@
++import "server-only";
++import { getResend } from "@/lib/resend";
++import type { EmailContent } from "@/emails/layout";
++import { welcomeEmail } from "@/emails/welcome";
++import { passwordResetEmail } from "@/emails/password-reset";
++
++export type SendResult = { ok: true; id: string } | { ok: false; error: string };
++
++function appUrl(path: string): string {
++  return new URL(path, process.env.APP_URL ?? "http://localhost:3000").toString();
++}
++
++// Never throws: a failed email must not break the request that triggered it.
++async function send(to: string, content: EmailContent, idempotencyKey?: string): Promise<SendResult> {
++  const from = process.env.RESEND_FROM_EMAIL;
++  if (!process.env.RESEND_API_KEY || !from) {
++    console.warn(`[email] RESEND_API_KEY / RESEND_FROM_EMAIL not set; skipped "${content.subject}" to ${to}`);
++    return { ok: false, error: "Email is not configured" };
++  }
++
++  try {
++    const { data, error } = await getResend().emails.send(
++      { from, to, subject: content.subject, html: content.html, text: content.text },
++      idempotencyKey ? { idempotencyKey } : undefined,
++    );
++    if (error || !data) {
++      console.error(`[email] Resend refused "${content.subject}" to ${to}:`, error);
++      return { ok: false, error: error?.message ?? "Unknown Resend error" };
++    }
++    return { ok: true, id: data.id };
++  } catch (err) {
++    console.error(`[email] Failed to send "${content.subject}" to ${to}:`, err);
++    return { ok: false, error: err instanceof Error ? err.message : String(err) };
++  }
++}
++
++export function sendWelcomeEmail(user: { id: string; email: string; name: string }): Promise<SendResult> {
++  return send(
++    user.email,
++    welcomeEmail({ name: user.name, dashboardUrl: appUrl("/dashboard") }),
++    `welcome/${user.id}`,
++  );
++}
++
++export function sendPasswordResetEmail(
++  user: { email: string; name: string },
++  token: string,
++  expiresInMinutes: number,
++): Promise<SendResult> {
++  const resetUrl = appUrl(`/reset-password?token=${encodeURIComponent(token)}`);
++  return send(user.email, passwordResetEmail({ name: user.name, resetUrl, expiresInMinutes }));
++}
+diff --git a/src/lib/resend.ts b/src/lib/resend.ts
+new file mode 100644
+index 0000000..3708f36
+--- /dev/null
++++ b/src/lib/resend.ts
+@@ -0,0 +1,11 @@
++import "server-only";
++import { Resend } from "resend";
++
++let client: Resend | undefined;
++
++// Created lazily: the Resend constructor throws without an API key, which would
++// break `next build` and any page that imports this module transitively.
++export function getResend(): Resend {
++  client ??= new Resend(process.env.RESEND_API_KEY);
++  return client;
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..7167567 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,10 @@
++import "server-only";
++import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
++import { promisify } from "node:util";
++import { sendPasswordResetEmail, sendWelcomeEmail } from "@/lib/email";
++
++const scryptAsync = promisify(scrypt) as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -10,6 +17,37 @@ const users: User[] = [
+   { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+ ];
+ 
++// In-memory stand-ins until there is a database. Keyed by user id.
++const passwordHashes = new Map<string, string>();
++// Keyed by sha256(token) so a leaked store can't be used to reset passwords.
++const resetTokens = new Map<string, { userId: string; expiresAt: number }>();
++
++const RESET_TOKEN_TTL_MINUTES = 60;
++const MIN_PASSWORD_LENGTH = 8;
++
++function normalizeEmail(email: string): string {
++  return email.trim().toLowerCase();
++}
++
++function hashToken(token: string): string {
++  return createHash("sha256").update(token).digest("hex");
++}
++
++async function hashPassword(password: string): Promise<string> {
++  const salt = randomBytes(16);
++  const key = await scryptAsync(password, salt, 64);
++  return `${salt.toString("hex")}:${key.toString("hex")}`;
++}
++
++export async function verifyPassword(userId: string, password: string): Promise<boolean> {
++  const stored = passwordHashes.get(userId);
++  if (!stored) return false;
++  const [saltHex, keyHex] = stored.split(":");
++  const expected = Buffer.from(keyHex, "hex");
++  const actual = await scryptAsync(password, Buffer.from(saltHex, "hex"), expected.length);
++  return timingSafeEqual(expected, actual);
++}
++
+ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+@@ -18,6 +56,67 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
++export async function getUserByEmail(email: string): Promise<User | undefined> {
++  const normalized = normalizeEmail(email);
++  return users.find((u) => u.email === normalized);
++}
++
++export async function createUser(input: { email: string; name: string; password?: string }): Promise<User> {
++  const email = normalizeEmail(input.email);
++  const name = input.name.trim();
++  if (!email.includes("@")) throw new Error("Invalid email address");
++  if (!name) throw new Error("Name is required");
++  if (await getUserByEmail(email)) throw new Error("A user with this email already exists");
++  if (input.password !== undefined && input.password.length < MIN_PASSWORD_LENGTH) {
++    throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
++  }
++
++  const user: User = { id: randomUUID(), email, name, createdAt: new Date().toISOString().slice(0, 10) };
++  users.push(user);
++  if (input.password !== undefined) passwordHashes.set(user.id, await hashPassword(input.password));
++
++  // Failures are logged inside sendWelcomeEmail; signup succeeds regardless.
++  await sendWelcomeEmail(user);
++  return user;
++}
++
++// Always resolves the same way whether or not the email exists, so callers can't
++// use it to discover which addresses have accounts.
++export async function requestPasswordReset(email: string): Promise<void> {
++  const user = await getUserByEmail(email);
++  if (!user) return;
++
++  // One live token per user: a new request invalidates older links.
++  for (const [key, entry] of resetTokens) {
++    if (entry.userId === user.id) resetTokens.delete(key);
++  }
++
++  const token = randomBytes(32).toString("base64url");
++  resetTokens.set(hashToken(token), {
++    userId: user.id,
++    expiresAt: Date.now() + RESET_TOKEN_TTL_MINUTES * 60_000,
++  });
++
++  await sendPasswordResetEmail(user, token, RESET_TOKEN_TTL_MINUTES);
++}
++
++export async function resetPassword(token: string, newPassword: string): Promise<{ ok: true } | { ok: false; error: string }> {
++  if (newPassword.length < MIN_PASSWORD_LENGTH) {
++    return { ok: false, error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` };
++  }
++
++  const key = hashToken(token);
++  const entry = resetTokens.get(key);
++  if (!entry || entry.expiresAt < Date.now()) {
++    resetTokens.delete(key);
++    return { ok: false, error: "This reset link is invalid or has expired" };
++  }
++
++  resetTokens.delete(key); // single use
++  passwordHashes.set(entry.userId, await hashPassword(newPassword));
++  return { ok: true };
++}
++
+ // TODO: there is no real session handling yet — the dashboard just picks the first user.
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];

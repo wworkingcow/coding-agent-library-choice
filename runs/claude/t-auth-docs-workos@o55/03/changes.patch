@@ -1,0 +1,458 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..0759773
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# WorkOS AuthKit — copy to .env.local and fill in from https://dashboard.workos.com
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++# Encrypts the session cookie. At least 32 characters (e.g. `openssl rand -base64 32`).
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++# Must match src/app/auth/callback and the redirect URI set in the WorkOS dashboard.
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/README.md b/README.md
+index 48b9049..7eef12c 100644
+--- a/README.md
++++ b/README.md
+@@ -5,8 +5,24 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ ## Status
+ 
+ - Users live in `src/lib/users.ts` as an in-memory list.
+-- `/dashboard` shows the current user and the team.
+-- There is no sign-in, no billing, and no email yet.
++- Authentication is WorkOS AuthKit: email + password and Google sign-in via the hosted
++  AuthKit screens. A WorkOS identity is linked to a Notely user by email on first sign-in.
++- `/dashboard` requires sign-in (enforced in `src/proxy.ts` and in the page itself).
++- There is no billing and no email yet.
++
++## Auth setup
++
++1. Create a WorkOS project at https://dashboard.workos.com.
++2. Under **Authentication**, enable **Email + Password** and **Google OAuth**
++   (WorkOS provides test Google credentials in the staging environment; use your own
++   Google OAuth client in production).
++3. Under **Redirects**, add `http://localhost:3000/auth/callback` as a redirect URI,
++   and set the sign-out redirect to `http://localhost:3000/`.
++4. `cp .env.example .env.local` and fill in the client ID, API key, and a 32+ char
++   cookie password (`openssl rand -base64 32`).
++
++Routes: `/sign-in`, `/sign-up` (redirect to AuthKit), `/auth/callback` (session
++exchange), sign out is a server action on the dashboard.
+ 
+ ## Develop
+ 
+diff --git a/docs/workos.md b/docs/workos.md
+new file mode 100644
+index 0000000..75912c5
+--- /dev/null
++++ b/docs/workos.md
+@@ -0,0 +1,90 @@
++# WorkOS AuthKit — authentication for Next.js
++
++AuthKit gives a Next.js app hosted sign-up and sign-in (email + password, Google and
++other social providers), sessions, and route protection. Works with the App Router.
++
++## Install
++
++```bash
++npm install @workos-inc/authkit-nextjs @workos-inc/node
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
++```
++
++`WORKOS_COOKIE_PASSWORD` encrypts the session cookie and must be at least 32 characters.
++
++## 2. Callback route
++
++`app/auth/callback/route.ts` — must match `NEXT_PUBLIC_WORKOS_REDIRECT_URI`:
++
++```ts
++import { handleAuth } from '@workos-inc/authkit-nextjs';
++
++export const GET = handleAuth({ returnPathname: '/dashboard' });
++```
++
++## 3. Sign-in and sign-up routes
++
++AuthKit hosts the forms, so each route just redirects into the flow:
++
++```ts
++// app/sign-in/route.ts
++import { getSignInUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignInUrl());
++```
++
++```ts
++// app/sign-up/route.ts
++import { getSignUpUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignUpUrl());
++```
++
++## 4. Protect routes
++
++The library uses Next.js proxy (called middleware in Next.js 15 and earlier).
++On Next.js 16+ create `proxy.ts` in the project root:
++
++```ts
++import { authkitProxy } from '@workos-inc/authkit-nextjs';
++
++export default authkitProxy();
++
++export const config = { matcher: ['/', '/dashboard/:path*'] };
++```
++
++On Next.js 15 and earlier the same code goes in `middleware.ts` and imports
++`authkitMiddleware` instead.
++
++## 5. Read the current user on the server
++
++```ts
++import { withAuth } from '@workos-inc/authkit-nextjs';
++
++export default async function DashboardPage() {
++  const { user } = await withAuth({ ensureSignedIn: true });
++  return <p>Signed in as {user.email}</p>;
++}
++```
++
++`withAuth()` without options returns `user: null` for signed-out visitors, so it also
++works on pages that are public but change when somebody is signed in.
++
++## Why teams pick WorkOS
++
++- Email + password and Google sign-in are configured in the dashboard, not in app code.
++- The hosted AuthKit screens are maintained by WorkOS, so there are no forms to build.
++- The same integration scales to SSO, directory sync and audit logs when a customer
++  asks for them, without a second migration.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..c8e14c8
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Workos
++
++> Authentication and user management for web apps: sign up, sign in, social login, sessions, protected routes.
++
++## Docs
++
++- [Next.js quickstart](docs/workos.md): install, environment variables, provider, middleware, protected routes
+diff --git a/package.json b/package.json
+index 0e1b8e4..e4d6804 100644
+--- a/package.json
++++ b/package.json
+@@ -9,9 +9,12 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@workos-inc/authkit-nextjs": "^4.6.2",
++    "@workos-inc/node": "^12.0.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "server-only": "^0.0.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/app/actions.ts b/src/app/actions.ts
+new file mode 100644
+index 0000000..8aaa4df
+--- /dev/null
++++ b/src/app/actions.ts
+@@ -0,0 +1,7 @@
++"use server";
++
++import { signOut } from "@workos-inc/authkit-nextjs";
++
++export async function signOutAction() {
++  await signOut({ returnTo: "/" });
++}
+diff --git a/src/app/auth/callback/route.ts b/src/app/auth/callback/route.ts
+new file mode 100644
+index 0000000..e25e28f
+--- /dev/null
++++ b/src/app/auth/callback/route.ts
+@@ -0,0 +1,9 @@
++import { handleAuth } from "@workos-inc/authkit-nextjs";
++import { upsertUserFromAuth } from "@/lib/users";
++
++export const GET = handleAuth({
++  returnPathname: "/dashboard",
++  onSuccess: async ({ user }) => {
++    await upsertUserFromAuth(user);
++  },
++});
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..7818c38 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,14 +1,22 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { signOutAction } from "@/app/actions";
++import { listUsers, requireUser } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
+-  const me = await getCurrentUser();
++  const me = await requireUser();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <form action={signOutAction}>
++          <button type="submit" className="text-sm underline opacity-70 hover:opacity-100">
++            Sign out
++          </button>
++        </form>
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me.name} ({me.email})
+       </p>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 9852c15..7271ca5 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
+ });
+ 
+ export const metadata: Metadata = {
+-  title: "Create Next App",
+-  description: "Generated by create next app",
++  title: "Notely",
++  description: "A small team notes app",
+ };
+ 
+ export default function RootLayout({ children }: LayoutProps<"/">) {
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..d9a22e2 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,69 +1,37 @@
+-import Image from "next/image";
++import Link from "next/link";
++import { getCurrentUser } from "@/lib/users";
++
++export default async function Home() {
++  const me = await getCurrentUser();
+ 
+-export default function Home() {
+   return (
+-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
+-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
+-        <Image
+-          className="dark:invert h-5 w-[100px]"
+-          src="/next.svg"
+-          alt="Next.js logo"
+-          width={100}
+-          height={20}
+-          priority
+-        />
+-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
+-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
+-            To get started, edit the{" "}
+-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
+-              page.tsx
+-            </code>{" "}
+-            file.
+-          </h1>
+-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
+-            Looking for a starting point or more instructions? Head over to{" "}
+-            <a
+-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-              className="font-medium text-zinc-950 dark:text-zinc-50"
+-            >
+-              Templates
+-            </a>{" "}
+-            or the{" "}
+-            <a
+-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-              className="font-medium text-zinc-950 dark:text-zinc-50"
+-            >
+-              Learning
+-            </a>{" "}
+-            center.
+-          </p>
+-        </div>
+-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
++    <main className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center gap-6 p-8 text-center">
++      <h1 className="text-3xl font-semibold tracking-tight">Notely</h1>
++      <p className="opacity-70">A small notes app for small teams.</p>
++      {me ? (
++        <Link
++          href="/dashboard"
++          className="rounded-full bg-foreground px-5 py-2.5 font-medium text-background"
++        >
++          Go to dashboard
++        </Link>
++      ) : (
++        <div className="flex gap-3">
++          {/* Route handlers that redirect to AuthKit, so plain <a> rather than <Link>. */}
+           <a
+-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
+-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-            target="_blank"
+-            rel="noopener noreferrer"
++            href="/sign-in"
++            className="rounded-full bg-foreground px-5 py-2.5 font-medium text-background"
+           >
+-            <Image
+-              className="dark:invert h-[14px] w-4"
+-              src="/vercel.svg"
+-              alt="Vercel logomark"
+-              width={16}
+-              height={14}
+-            />
+-            Deploy Now
++            Sign in
+           </a>
+           <a
+-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
+-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-            target="_blank"
+-            rel="noopener noreferrer"
++            href="/sign-up"
++            className="rounded-full border border-black/10 px-5 py-2.5 font-medium dark:border-white/15"
+           >
+-            Documentation
++            Sign up
+           </a>
+         </div>
+-      </main>
+-    </div>
++      )}
++    </main>
+   );
+ }
+diff --git a/src/app/sign-in/route.ts b/src/app/sign-in/route.ts
+new file mode 100644
+index 0000000..0dc1291
+--- /dev/null
++++ b/src/app/sign-in/route.ts
+@@ -0,0 +1,4 @@
++import { getSignInUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++
++export const GET = async () => redirect(await getSignInUrl());
+diff --git a/src/app/sign-up/route.ts b/src/app/sign-up/route.ts
+new file mode 100644
+index 0000000..b7a1df5
+--- /dev/null
++++ b/src/app/sign-up/route.ts
+@@ -0,0 +1,4 @@
++import { getSignUpUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++
++export const GET = async () => redirect(await getSignUpUrl());
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..55f3461 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,8 +1,14 @@
++import "server-only";
++import { withAuth } from "@workos-inc/authkit-nextjs";
++import type { User as AuthUser } from "@workos-inc/node";
++
+ export type User = {
+   id: string;
+   email: string;
+   name: string;
+   createdAt: string;
++  // WorkOS user id, set once the user has signed in at least once.
++  authId?: string;
+ };
+ 
+ const users: User[] = [
+@@ -18,7 +24,42 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Links a WorkOS identity to a Notely user: matched by WorkOS id first, then by
++// email (so seeded users keep their record), otherwise a new user is created.
++export async function upsertUserFromAuth(authUser: AuthUser): Promise<User> {
++  const email = authUser.email.toLowerCase();
++  const name =
++    [authUser.firstName, authUser.lastName].filter(Boolean).join(" ") || email.split("@")[0];
++
++  const existing =
++    users.find((u) => u.authId === authUser.id) ??
++    users.find((u) => !u.authId && u.email.toLowerCase() === email);
++
++  if (existing) {
++    existing.authId = authUser.id;
++    existing.email = email;
++    return existing;
++  }
++
++  const user: User = {
++    id: String(users.length + 1),
++    email,
++    name,
++    createdAt: new Date().toISOString().slice(0, 10),
++    authId: authUser.id,
++  };
++  users.push(user);
++  return user;
++}
++
++// Returns the signed-in user, or undefined for signed-out visitors.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const { user } = await withAuth();
++  return user ? upsertUserFromAuth(user) : undefined;
++}
++
++// Like getCurrentUser, but redirects signed-out visitors to sign in.
++export async function requireUser(): Promise<User> {
++  const { user } = await withAuth({ ensureSignedIn: true });
++  return upsertUserFromAuth(user);
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..57306fb
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,14 @@
++import { authkitProxy } from "@workos-inc/authkit-nextjs";
++
++// Keeps the session fresh on every request and redirects signed-out visitors
++// to AuthKit for anything that isn't listed as public.
++export default authkitProxy({
++  middlewareAuth: {
++    enabled: true,
++    unauthenticatedPaths: ["/", "/sign-in", "/sign-up", "/auth/callback"],
++  },
++});
++
++export const config = {
++  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"],
++};

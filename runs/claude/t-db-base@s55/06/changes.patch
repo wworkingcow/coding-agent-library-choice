@@ -1,0 +1,307 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..fc8b49d
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,2 @@
++# Postgres connection string (placeholder credentials)
++DATABASE_URL=postgres://app:change-me@localhost:5432/app
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/docker-compose.yml b/docker-compose.yml
+new file mode 100644
+index 0000000..752e72e
+--- /dev/null
++++ b/docker-compose.yml
+@@ -0,0 +1,13 @@
++services:
++  db:
++    image: postgres:17
++    environment:
++      POSTGRES_USER: app
++      POSTGRES_PASSWORD: change-me
++      POSTGRES_DB: app
++    ports:
++      - "5432:5432"
++    volumes:
++      - pgdata:/var/lib/postgresql/data
++volumes:
++  pgdata:
+diff --git a/drizzle.config.ts b/drizzle.config.ts
+new file mode 100644
+index 0000000..1ace120
+--- /dev/null
++++ b/drizzle.config.ts
+@@ -0,0 +1,8 @@
++import { defineConfig } from "drizzle-kit";
++
++export default defineConfig({
++  dialect: "postgresql",
++  schema: "./src/db/schema.ts",
++  out: "./drizzle",
++  dbCredentials: { url: process.env.DATABASE_URL ?? "" },
++});
+diff --git a/drizzle/0000_massive_norrin_radd.sql b/drizzle/0000_massive_norrin_radd.sql
+new file mode 100644
+index 0000000..bef5a38
+--- /dev/null
++++ b/drizzle/0000_massive_norrin_radd.sql
+@@ -0,0 +1,7 @@
++CREATE TABLE "users" (
++	"id" serial PRIMARY KEY NOT NULL,
++	"email" text NOT NULL,
++	"name" text NOT NULL,
++	"created_at" date DEFAULT now() NOT NULL,
++	CONSTRAINT "users_email_unique" UNIQUE("email")
++);
+diff --git a/drizzle/meta/0000_snapshot.json b/drizzle/meta/0000_snapshot.json
+new file mode 100644
+index 0000000..4410ea9
+--- /dev/null
++++ b/drizzle/meta/0000_snapshot.json
+@@ -0,0 +1,65 @@
++{
++  "id": "d300c329-e54a-42d5-aa45-5b0717b2a5fd",
++  "prevId": "00000000-0000-0000-0000-000000000000",
++  "version": "7",
++  "dialect": "postgresql",
++  "tables": {
++    "public.users": {
++      "name": "users",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "serial",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "email": {
++          "name": "email",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "date",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "users_email_unique": {
++          "name": "users_email_unique",
++          "nullsNotDistinct": false,
++          "columns": [
++            "email"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    }
++  },
++  "enums": {},
++  "schemas": {},
++  "sequences": {},
++  "roles": {},
++  "policies": {},
++  "views": {},
++  "_meta": {
++    "columns": {},
++    "schemas": {},
++    "tables": {}
++  }
++}
+\ No newline at end of file
+diff --git a/drizzle/meta/_journal.json b/drizzle/meta/_journal.json
+new file mode 100644
+index 0000000..975b0c4
+--- /dev/null
++++ b/drizzle/meta/_journal.json
+@@ -0,0 +1,13 @@
++{
++  "version": "7",
++  "dialect": "postgresql",
++  "entries": [
++    {
++      "idx": 0,
++      "version": "7",
++      "when": 1793121812677,
++      "tag": "0000_massive_norrin_radd",
++      "breakpoints": true
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/package.json b/package.json
+index 0e1b8e4..9f8df3f 100644
+--- a/package.json
++++ b/package.json
+@@ -6,10 +6,15 @@
+     "dev": "next dev",
+     "build": "next build",
+     "start": "next start",
+-    "lint": "eslint"
++    "lint": "eslint",
++    "db:generate": "drizzle-kit generate",
++    "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
++    "db:seed": "tsx --env-file=.env src/db/seed.ts"
+   },
+   "dependencies": {
++    "drizzle-orm": "^0.45.4",
+     "next": "16.3.4",
++    "postgres": "^3.4.9",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+@@ -18,9 +23,11 @@
+     "@types/node": "^20",
+     "@types/react": "^19",
+     "@types/react-dom": "^19",
++    "drizzle-kit": "^0.31.11",
+     "eslint": "^9",
+     "eslint-config-next": "16.3.4",
+     "tailwindcss": "^4",
++    "tsx": "^4.23.15",
+     "typescript": "^5"
+   }
+ }
+diff --git a/src/db/index.ts b/src/db/index.ts
+new file mode 100644
+index 0000000..5222158
+--- /dev/null
++++ b/src/db/index.ts
+@@ -0,0 +1,16 @@
++import { drizzle } from "drizzle-orm/postgres-js";
++import postgres from "postgres";
++import * as schema from "./schema";
++
++const globalForDb = globalThis as unknown as { pg?: ReturnType<typeof postgres> };
++
++function connect() {
++  const url = process.env.DATABASE_URL;
++  if (!url) throw new Error("DATABASE_URL is not set (see .env.example)");
++  return postgres(url);
++}
++
++// Reuse the client across Next.js dev hot reloads.
++const client = (globalForDb.pg ??= connect());
++
++export const db = drizzle(client, { schema });
+diff --git a/src/db/migrate.ts b/src/db/migrate.ts
+new file mode 100644
+index 0000000..85169fb
+--- /dev/null
++++ b/src/db/migrate.ts
+@@ -0,0 +1,11 @@
++import { drizzle } from "drizzle-orm/postgres-js";
++import { migrate } from "drizzle-orm/postgres-js/migrator";
++import postgres from "postgres";
++
++const url = process.env.DATABASE_URL;
++if (!url) throw new Error("DATABASE_URL is not set (see .env.example)");
++
++const client = postgres(url, { max: 1 });
++await migrate(drizzle(client), { migrationsFolder: "./drizzle" });
++await client.end();
++console.log("Migrations applied");
+diff --git a/src/db/schema.ts b/src/db/schema.ts
+new file mode 100644
+index 0000000..194e309
+--- /dev/null
++++ b/src/db/schema.ts
+@@ -0,0 +1,8 @@
++import { date, pgTable, serial, text } from "drizzle-orm/pg-core";
++
++export const users = pgTable("users", {
++  id: serial("id").primaryKey(),
++  email: text("email").notNull().unique(),
++  name: text("name").notNull(),
++  createdAt: date("created_at", { mode: "string" }).notNull().defaultNow(),
++});
+diff --git a/src/db/seed.ts b/src/db/seed.ts
+new file mode 100644
+index 0000000..cfe4083
+--- /dev/null
++++ b/src/db/seed.ts
+@@ -0,0 +1,17 @@
++import { drizzle } from "drizzle-orm/postgres-js";
++import postgres from "postgres";
++import { users } from "./schema";
++
++const url = process.env.DATABASE_URL;
++if (!url) throw new Error("DATABASE_URL is not set (see .env.example)");
++
++const client = postgres(url, { max: 1 });
++await drizzle(client)
++  .insert(users)
++  .values([
++    { email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
++    { email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++  ])
++  .onConflictDoNothing({ target: users.email });
++await client.end();
++console.log("Seeded");
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..7d1e300 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,7 @@
++import { asc, eq } from "drizzle-orm";
++import { db } from "@/db";
++import { users } from "@/db/schema";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -5,20 +9,23 @@ export type User = {
+   createdAt: string;
+ };
+ 
+-const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+-];
++function toUser(row: typeof users.$inferSelect): User {
++  return { ...row, id: String(row.id) };
++}
+ 
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  const rows = await db.select().from(users).orderBy(asc(users.id));
++  return rows.map(toUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  if (!/^\d+$/.test(id)) return undefined;
++  const [row] = await db.select().from(users).where(eq(users.id, Number(id)));
++  return row && toUser(row);
+ }
+ 
+ // TODO: there is no real session handling yet — the dashboard just picks the first user.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const [row] = await db.select().from(users).orderBy(asc(users.id)).limit(1);
++  return row && toUser(row);
+ }

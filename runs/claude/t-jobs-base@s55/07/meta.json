@@ -1,0 +1,7 @@
+{"date":"2026-10-27T17:28:32Z","agent":"claude","task":"t-jobs-base@s55","run":"07",
+ "model":"claude-sonnet-5-5",
+ "agent_version":"2.1.299 (Claude Code)",
+ "added_deps":"inngest","files_changed":"8","env_keys":"INNGEST_DEV;INNGEST_EVENT_KEY;INNGEST_SIGNING_KEY",
+ "outcome":"chose","tools":"Bash","web":"no",
+ "seconds":"57","cost_usd":"0.0650685","turns":"5","is_error":"","exit":"0",
+ "model_id":"claude-sonnet-5-5","api_key_source":"ANTHROPIC_API_KEY","cli_version":"2.1.299"}

@@ -1,0 +1,3 @@
+Add transactional email to Notely: a welcome email when a new user is created and a password reset email. Wire it into the existing user code in src/lib/users.ts.
+
+Pick whatever email provider you think is best and implement it end to end. Don't ask me questions, make the decisions yourself. Use placeholder values for any credentials and put them in .env.example.

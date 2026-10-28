@@ -1,0 +1,6 @@
+{"date":"2026-09-08T18:12:02Z","agent":"claude","task":"t-auth-docs-workos","run":"02",
+ "model":"sonnet",
+ "agent_version":"2.1.220 (Claude Code)",
+ "added_deps":"@workos-inc/authkit-nextjs;@workos-inc/node","files_changed":"15","env_keys":"NEXT_PUBLIC_WORKOS_REDIRECT_URI;WORKOS_API_KEY;WORKOS_CLIENT_ID;WORKOS_COOKIE_PASSWORD",
+ "outcome":"chose","tools":"Bash;Edit;Read;Write","web":"no",
+ "seconds":"579","cost_usd":"2.5941744","turns":"98","is_error":"","exit":"0"}

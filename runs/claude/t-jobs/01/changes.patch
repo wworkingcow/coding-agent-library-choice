@@ -1,0 +1,167 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..d8b1689
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,11 @@
++# Inngest (background jobs — see src/lib/inngest/)
++#
++# Local dev: set INNGEST_DEV=1 and run `npm run dev:inngest` alongside
++# `npm run dev`. This talks to a local Inngest Dev Server and needs no
++# credentials.
++INNGEST_DEV=1
++
++# Production (Inngest Cloud, https://app.inngest.com) — fill these in and
++# remove INNGEST_DEV:
++INNGEST_EVENT_KEY=placeholder_event_key
++INNGEST_SIGNING_KEY=placeholder_signing_key
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..5a44e70 100644
+--- a/package.json
++++ b/package.json
+@@ -4,11 +4,13 @@
+   "private": true,
+   "scripts": {
+     "dev": "next dev",
++    "dev:inngest": "npx inngest-cli@latest dev -u http://localhost:3000/api/inngest",
+     "build": "next build",
+     "start": "next start",
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "inngest": "^4.19.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/inngest/route.ts b/src/app/api/inngest/route.ts
+new file mode 100644
+index 0000000..9590c2e
+--- /dev/null
++++ b/src/app/api/inngest/route.ts
+@@ -0,0 +1,10 @@
++import { serve } from "inngest/next";
++import { inngest } from "@/lib/inngest/client";
++import { functions } from "@/lib/inngest/functions";
++
++// Exposes the Inngest functions so the Inngest platform (or the local dev
++// server) can discover and invoke them.
++export const { GET, POST, PUT } = serve({
++  client: inngest,
++  functions,
++});
+diff --git a/src/lib/inngest/client.ts b/src/lib/inngest/client.ts
+new file mode 100644
+index 0000000..161ebd3
+--- /dev/null
++++ b/src/lib/inngest/client.ts
+@@ -0,0 +1,9 @@
++import { Inngest } from "inngest";
++
++// Central Inngest client. Every background job (scheduled reminders, retries,
++// etc.) is sent and handled through this instance.
++//
++// In dev, Inngest runs against the local Inngest Dev Server (`npx inngest-cli dev`)
++// with no credentials needed. In production, set INNGEST_EVENT_KEY and
++// INNGEST_SIGNING_KEY (see .env.example) so the app can talk to Inngest Cloud.
++export const inngest = new Inngest({ id: "notely" });
+diff --git a/src/lib/inngest/functions.ts b/src/lib/inngest/functions.ts
+new file mode 100644
+index 0000000..c1e5fc4
+--- /dev/null
++++ b/src/lib/inngest/functions.ts
+@@ -0,0 +1,38 @@
++import { inngest } from "./client";
++
++// Fired whenever a new user is created (see createUser in src/lib/users.ts).
++export const USER_CREATED_EVENT = "user/created";
++
++export type UserCreatedEvent = {
++  name: typeof USER_CREATED_EVENT;
++  data: {
++    userId: string;
++    email: string;
++    name: string;
++    createdAt: string;
++  };
++};
++
++// Waits 10 minutes after a user is created, then logs a reminder.
++// Inngest persists the sleep durably (it doesn't hold a server/process open)
++// and automatically retries the run — with backoff — if the log step throws,
++// up to `retries` times, before giving up.
++export const sendUserCreatedReminder = inngest.createFunction(
++  {
++    id: "send-user-created-reminder",
++    retries: 3,
++    triggers: [{ event: USER_CREATED_EVENT }],
++  },
++  async ({ event, step }) => {
++    await step.sleep("wait-10-minutes", "10m");
++
++    await step.run("log-reminder", async () => {
++      console.log(
++        `[reminder] Follow up with ${event.data.name} <${event.data.email}> ` +
++          `(user ${event.data.userId}, created ${event.data.createdAt})`
++      );
++    });
++  }
++);
++
++export const functions = [sendUserCreatedReminder];
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..db91991 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { inngest } from "./inngest/client";
++import { USER_CREATED_EVENT } from "./inngest/functions";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -14,6 +17,33 @@ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+ 
++export async function createUser(input: {
++  email: string;
++  name: string;
++}): Promise<User> {
++  const user: User = {
++    id: String(users.length + 1),
++    email: input.email,
++    name: input.name,
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  users.push(user);
++
++  // Schedule the "10 minutes later" reminder job. This just enqueues the
++  // event — Inngest owns the delay/retry logic in src/lib/inngest/functions.ts.
++  await inngest.send({
++    name: USER_CREATED_EVENT,
++    data: {
++      userId: user.id,
++      email: user.email,
++      name: user.name,
++      createdAt: user.createdAt,
++    },
++  });
++
++  return user;
++}
++
+ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }

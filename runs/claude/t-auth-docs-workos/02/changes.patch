@@ -1,0 +1,431 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..512b182
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,12 @@
++# WorkOS AuthKit — get real values from https://dashboard.workos.com
++# Copy this file to .env.local and fill in your own values.
++
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++
++# Encrypts the session cookie. Must be at least 32 characters.
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++
++# Must match the redirect URI configured for this app in the WorkOS dashboard,
++# and the route below.
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/docs/workos.md b/docs/workos.md
+new file mode 100644
+index 0000000..75912c5
+--- /dev/null
++++ b/docs/workos.md
+@@ -0,0 +1,90 @@
++# WorkOS AuthKit — authentication for Next.js
++
++AuthKit gives a Next.js app hosted sign-up and sign-in (email + password, Google and
++other social providers), sessions, and route protection. Works with the App Router.
++
++## Install
++
++```bash
++npm install @workos-inc/authkit-nextjs @workos-inc/node
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
++```
++
++`WORKOS_COOKIE_PASSWORD` encrypts the session cookie and must be at least 32 characters.
++
++## 2. Callback route
++
++`app/auth/callback/route.ts` — must match `NEXT_PUBLIC_WORKOS_REDIRECT_URI`:
++
++```ts
++import { handleAuth } from '@workos-inc/authkit-nextjs';
++
++export const GET = handleAuth({ returnPathname: '/dashboard' });
++```
++
++## 3. Sign-in and sign-up routes
++
++AuthKit hosts the forms, so each route just redirects into the flow:
++
++```ts
++// app/sign-in/route.ts
++import { getSignInUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignInUrl());
++```
++
++```ts
++// app/sign-up/route.ts
++import { getSignUpUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignUpUrl());
++```
++
++## 4. Protect routes
++
++The library uses Next.js proxy (called middleware in Next.js 15 and earlier).
++On Next.js 16+ create `proxy.ts` in the project root:
++
++```ts
++import { authkitProxy } from '@workos-inc/authkit-nextjs';
++
++export default authkitProxy();
++
++export const config = { matcher: ['/', '/dashboard/:path*'] };
++```
++
++On Next.js 15 and earlier the same code goes in `middleware.ts` and imports
++`authkitMiddleware` instead.
++
++## 5. Read the current user on the server
++
++```ts
++import { withAuth } from '@workos-inc/authkit-nextjs';
++
++export default async function DashboardPage() {
++  const { user } = await withAuth({ ensureSignedIn: true });
++  return <p>Signed in as {user.email}</p>;
++}
++```
++
++`withAuth()` without options returns `user: null` for signed-out visitors, so it also
++works on pages that are public but change when somebody is signed in.
++
++## Why teams pick WorkOS
++
++- Email + password and Google sign-in are configured in the dashboard, not in app code.
++- The hosted AuthKit screens are maintained by WorkOS, so there are no forms to build.
++- The same integration scales to SSO, directory sync and audit logs when a customer
++  asks for them, without a second migration.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..c8e14c8
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Workos
++
++> Authentication and user management for web apps: sign up, sign in, social login, sessions, protected routes.
++
++## Docs
++
++- [Next.js quickstart](docs/workos.md): install, environment variables, provider, middleware, protected routes
+diff --git a/middleware.ts b/middleware.ts
+new file mode 100644
+index 0000000..26e46cc
+--- /dev/null
++++ b/middleware.ts
+@@ -0,0 +1,8 @@
++import { authkitMiddleware } from "@workos-inc/authkit-nextjs";
++
++// Keeps the AuthKit session cookie fresh on the routes that read it.
++// Actual enforcement (redirecting signed-out visitors) happens in the
++// dashboard page via `withAuth({ ensureSignedIn: true })`.
++export default authkitMiddleware();
++
++export const config = { matcher: ["/", "/dashboard/:path*"] };
+diff --git a/package.json b/package.json
+index 0e1b8e4..8d49460 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,8 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@workos-inc/authkit-nextjs": "^4.3.1",
++    "@workos-inc/node": "^10.13.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/auth/callback/route.ts b/src/app/auth/callback/route.ts
+new file mode 100644
+index 0000000..d5a2aa1
+--- /dev/null
++++ b/src/app/auth/callback/route.ts
+@@ -0,0 +1,4 @@
++import { handleAuth } from "@workos-inc/authkit-nextjs";
++
++// Must match NEXT_PUBLIC_WORKOS_REDIRECT_URI.
++export const GET = handleAuth({ returnPathname: "/dashboard" });
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..5e15834 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,14 +1,20 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { listUsers, requireCurrentUser } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
+-  const me = await getCurrentUser();
++  // Redirects to sign-in if nobody is signed in.
++  const me = await requireCurrentUser();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-start justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <a href="/sign-out" className="text-sm underline opacity-70 hover:opacity-100">
++          Sign out
++        </a>
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me.name} ({me.email})
+       </p>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 9852c15..598ab79 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
+ });
+ 
+ export const metadata: Metadata = {
+-  title: "Create Next App",
+-  description: "Generated by create next app",
++  title: "Notely",
++  description: "Notely",
+ };
+ 
+ export default function RootLayout({ children }: LayoutProps<"/">) {
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..4f94a8f 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,68 +1,51 @@
+-import Image from "next/image";
++import { getCurrentUser } from "@/lib/users";
++
++export default async function Home() {
++  const me = await getCurrentUser();
+ 
+-export default function Home() {
+   return (
+     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
+-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
+-        <Image
+-          className="dark:invert h-5 w-[100px]"
+-          src="/next.svg"
+-          alt="Next.js logo"
+-          width={100}
+-          height={20}
+-          priority
+-        />
+-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
+-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
+-            To get started, edit the{" "}
+-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
+-              page.tsx
+-            </code>{" "}
+-            file.
+-          </h1>
+-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
+-            Looking for a starting point or more instructions? Head over to{" "}
+-            <a
+-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-              className="font-medium text-zinc-950 dark:text-zinc-50"
+-            >
+-              Templates
+-            </a>{" "}
+-            or the{" "}
++      <main className="flex flex-1 w-full max-w-md flex-col items-center justify-center gap-6 px-6 text-center">
++        <h1 className="text-3xl font-semibold tracking-tight text-black dark:text-zinc-50">
++          Notely
++        </h1>
++
++        {me ? (
++          <>
++            <p className="text-sm text-zinc-600 dark:text-zinc-400">
++              Signed in as {me.name} ({me.email})
++            </p>
+             <a
+-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-              className="font-medium text-zinc-950 dark:text-zinc-50"
++              href="/dashboard"
++              className="flex h-11 items-center justify-center rounded-full bg-foreground px-6 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
+             >
+-              Learning
+-            </a>{" "}
+-            center.
+-          </p>
+-        </div>
+-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
+-          <a
+-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
+-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-            target="_blank"
+-            rel="noopener noreferrer"
+-          >
+-            <Image
+-              className="dark:invert h-[14px] w-4"
+-              src="/vercel.svg"
+-              alt="Vercel logomark"
+-              width={16}
+-              height={14}
+-            />
+-            Deploy Now
+-          </a>
+-          <a
+-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
+-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+-            target="_blank"
+-            rel="noopener noreferrer"
+-          >
+-            Documentation
+-          </a>
+-        </div>
++              Go to dashboard
++            </a>
++            <a href="/sign-out" className="text-sm underline opacity-70 hover:opacity-100">
++              Sign out
++            </a>
++          </>
++        ) : (
++          <>
++            <p className="text-sm text-zinc-600 dark:text-zinc-400">
++              Sign in with email and password, or with Google.
++            </p>
++            <div className="flex gap-3">
++              <a
++                href="/sign-in"
++                className="flex h-11 items-center justify-center rounded-full bg-foreground px-6 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
++              >
++                Sign in
++              </a>
++              <a
++                href="/sign-up"
++                className="flex h-11 items-center justify-center rounded-full border border-solid border-black/[.08] px-6 text-sm font-medium transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++              >
++                Sign up
++              </a>
++            </div>
++          </>
++        )}
+       </main>
+     </div>
+   );
+diff --git a/src/app/sign-in/route.ts b/src/app/sign-in/route.ts
+new file mode 100644
+index 0000000..7430de5
+--- /dev/null
++++ b/src/app/sign-in/route.ts
+@@ -0,0 +1,6 @@
++import { getSignInUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++
++// AuthKit hosts the sign-in form (email + password and Google), so this
++// route just kicks off the flow.
++export const GET = async () => redirect(await getSignInUrl());
+diff --git a/src/app/sign-out/route.ts b/src/app/sign-out/route.ts
+new file mode 100644
+index 0000000..13228ee
+--- /dev/null
++++ b/src/app/sign-out/route.ts
+@@ -0,0 +1,6 @@
++import { signOut } from "@workos-inc/authkit-nextjs";
++
++// Clears the session cookie and redirects home.
++export const GET = async () => {
++  await signOut({ returnTo: "/" });
++};
+diff --git a/src/app/sign-up/route.ts b/src/app/sign-up/route.ts
+new file mode 100644
+index 0000000..b0b17d5
+--- /dev/null
++++ b/src/app/sign-up/route.ts
+@@ -0,0 +1,6 @@
++import { getSignUpUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++
++// AuthKit hosts the sign-up form (email + password and Google), so this
++// route just kicks off the flow.
++export const GET = async () => redirect(await getSignUpUrl());
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..2138941 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { withAuth } from "@workos-inc/authkit-nextjs";
++import type { User as WorkOSUser } from "@workos-inc/node";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -5,11 +8,26 @@ export type User = {
+   createdAt: string;
+ };
+ 
++// Mock teammates shown on the dashboard alongside the signed-in user.
+ const users: User[] = [
+   { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+   { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+ ];
+ 
++function toUser(workosUser: WorkOSUser): User {
++  const name =
++    workosUser.name ||
++    [workosUser.firstName, workosUser.lastName].filter(Boolean).join(" ") ||
++    workosUser.email;
++
++  return {
++    id: workosUser.id,
++    email: workosUser.email,
++    name,
++    createdAt: workosUser.createdAt,
++  };
++}
++
+ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+@@ -18,7 +36,18 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Reads the real signed-in user from the WorkOS session. Returns undefined
++// when nobody is signed in — callers that require auth (e.g. /dashboard)
++// should use `requireCurrentUser` instead.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const { user } = await withAuth();
++  return user ? toUser(user) : undefined;
++}
++
++// Same as `getCurrentUser`, but redirects signed-out visitors into the
++// AuthKit sign-in flow instead of returning undefined. Use this at the top
++// of any page that must be behind auth.
++export async function requireCurrentUser(): Promise<User> {
++  const { user } = await withAuth({ ensureSignedIn: true });
++  return toUser(user);
+ }

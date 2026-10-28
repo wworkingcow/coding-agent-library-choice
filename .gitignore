@@ -1,0 +1,9 @@
+/scaffold/
+/scaffolds/
+/fakehome/
+/fakehome-api/
+/STOP
+*.log
+__pycache__/
+.DS_Store
+runs/*/*/*/app/

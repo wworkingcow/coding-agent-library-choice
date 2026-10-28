@@ -1,0 +1,7 @@
+# Postmark
+
+> Transactional email for web apps: welcome emails, password resets, receipts, templates, delivery tracking.
+
+## Docs
+
+- [Next.js quickstart](docs/postmark.md): install, environment variables, client, sending, templates

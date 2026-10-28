@@ -1,0 +1,229 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..f9b10c8
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,13 @@
++# WorkOS AuthKit — https://dashboard.workos.com
++# Get these from your WorkOS dashboard (Configuration -> API keys / Redirects).
++# Email+password and Google sign-in are both toggled on in the WorkOS dashboard,
++# not in app code — see "Authentication" in the dashboard for the Google OAuth setup.
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++
++# Encrypts the session cookie. Must be at least 32 characters. Generate with:
++#   openssl rand -base64 32
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++
++# Must match the redirect URI configured in the WorkOS dashboard for this environment.
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..8d49460 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,8 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@workos-inc/authkit-nextjs": "^4.3.1",
++    "@workos-inc/node": "^10.13.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/auth/callback/route.ts b/src/app/auth/callback/route.ts
+new file mode 100644
+index 0000000..16abc78
+--- /dev/null
++++ b/src/app/auth/callback/route.ts
+@@ -0,0 +1,5 @@
++import { handleAuth } from "@workos-inc/authkit-nextjs";
++
++// Completes the WorkOS AuthKit redirect (email+password or Google) and sets
++// the session cookie. Must match NEXT_PUBLIC_WORKOS_REDIRECT_URI.
++export const GET = handleAuth({ returnPathname: "/dashboard" });
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..9f0bf0d 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,12 +1,19 @@
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
++  // src/proxy.ts already redirects signed-out visitors to sign-in before this
++  // page renders, so `me` is expected to be set here.
+   const me = await getCurrentUser();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <a href="/sign-out" className="text-sm underline opacity-70 hover:opacity-100">
++          Sign out
++        </a>
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..f21aac2 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,9 +1,28 @@
+ import Image from "next/image";
++import { getCurrentUser } from "@/lib/users";
++
++export default async function Home() {
++  const me = await getCurrentUser();
+ 
+-export default function Home() {
+   return (
+     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
+       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
++        <nav className="w-full flex justify-end gap-4 text-sm font-medium">
++          {me ? (
++            <a href="/dashboard" className="underline">
++              Go to dashboard
++            </a>
++          ) : (
++            <>
++              <a href="/sign-in" className="underline">
++                Sign in
++              </a>
++              <a href="/sign-up" className="underline">
++                Sign up
++              </a>
++            </>
++          )}
++        </nav>
+         <Image
+           className="dark:invert h-5 w-[100px]"
+           src="/next.svg"
+diff --git a/src/app/sign-in/route.ts b/src/app/sign-in/route.ts
+new file mode 100644
+index 0000000..bbac111
+--- /dev/null
++++ b/src/app/sign-in/route.ts
+@@ -0,0 +1,10 @@
++import { getSignInUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++import type { NextRequest } from "next/server";
++
++// AuthKit hosts the sign-in form (email + password and Google), so this route
++// just forwards into the hosted flow.
++export async function GET(request: NextRequest) {
++  const returnTo = request.nextUrl.searchParams.get("returnTo") ?? undefined;
++  redirect(await getSignInUrl({ returnTo }));
++}
+diff --git a/src/app/sign-out/route.ts b/src/app/sign-out/route.ts
+new file mode 100644
+index 0000000..0df0776
+--- /dev/null
++++ b/src/app/sign-out/route.ts
+@@ -0,0 +1,6 @@
++import { signOut } from "@workos-inc/authkit-nextjs";
++
++// Clears the session cookie and sends the user back to the homepage.
++export async function GET() {
++  await signOut({ returnTo: "/" });
++}
+diff --git a/src/app/sign-up/route.ts b/src/app/sign-up/route.ts
+new file mode 100644
+index 0000000..e1f0432
+--- /dev/null
++++ b/src/app/sign-up/route.ts
+@@ -0,0 +1,10 @@
++import { getSignUpUrl } from "@workos-inc/authkit-nextjs";
++import { redirect } from "next/navigation";
++import type { NextRequest } from "next/server";
++
++// AuthKit hosts the sign-up form (email + password and Google), so this route
++// just forwards into the hosted flow.
++export async function GET(request: NextRequest) {
++  const returnTo = request.nextUrl.searchParams.get("returnTo") ?? undefined;
++  redirect(await getSignUpUrl({ returnTo }));
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..b6dc2fb 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { withAuth } from "@workos-inc/authkit-nextjs";
++import type { User as WorkOSUser } from "@workos-inc/node";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -18,7 +21,35 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Mirrors a WorkOS user into the local `users` list, inserting on first sign-in
++// and refreshing name/email on every later one. `createdAt` is kept stable
++// once a local record exists so it reflects first sign-in, not last.
++function upsertUser(workosUser: WorkOSUser): User {
++  const existing = users.find((u) => u.id === workosUser.id);
++  const name =
++    workosUser.name ??
++    ([workosUser.firstName, workosUser.lastName].filter(Boolean).join(" ") ||
++      workosUser.email);
++
++  const user: User = {
++    id: workosUser.id,
++    email: workosUser.email,
++    name,
++    createdAt: existing?.createdAt ?? workosUser.createdAt,
++  };
++
++  if (existing) {
++    Object.assign(existing, user);
++  } else {
++    users.push(user);
++  }
++  return user;
++}
++
++// Reads the signed-in WorkOS session (if any) and syncs it into the local
++// user list. Returns undefined when nobody is signed in.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const { user } = await withAuth();
++  if (!user) return undefined;
++  return upsertUser(user);
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..b1ce4a0
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,16 @@
++import { authkitProxy } from "@workos-inc/authkit-nextjs";
++
++// `middlewareAuth.enabled: true` requires a signed-in session on every path
++// hit by the matcher below, redirecting straight into the WorkOS hosted
++// sign-in flow otherwise — except paths listed in `unauthenticatedPaths`.
++// "/" is listed there (not gated) but still needs to be in the matcher: the
++// proxy is what attaches session data to the request, and `withAuth()` throws
++// on any route the proxy doesn't cover, even to ask "is anyone signed in?"
++// (which the homepage does, to show a Dashboard vs. Sign in/Sign up link).
++// (Bare `authkitProxy()` with no `middlewareAuth` option would just manage the
++// session cookie without enforcing anything.)
++export default authkitProxy({
++  middlewareAuth: { enabled: true, unauthenticatedPaths: ["/"] },
++});
++
++export const config = { matcher: ["/", "/dashboard/:path*"] };

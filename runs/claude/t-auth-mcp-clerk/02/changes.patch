@@ -1,0 +1,216 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..c43c6f6
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,11 @@
++# Clerk (https://dashboard.clerk.com) — replace with your app's real keys.
++# Enable "Email" (with password) and "Google" under User & Authentication ->
++# Email, Phone, Username / Social Connections in the Clerk dashboard.
++NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_cGxhY2Vob2xkZXItaW5zdGFuY2UuY2xlcmsuYWNjb3VudHMuZGV2JA==
++CLERK_SECRET_KEY=sk_test_placeholder000000000000000000000000
++
++# Where Clerk's prebuilt pages live and where to send users afterwards.
++NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
++NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
++NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/dashboard
++NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/dashboard
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..973e43e 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@clerk/nextjs": "^7.9.1",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..62191b3 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,12 +1,20 @@
++import { UserButton } from "@clerk/nextjs";
++import { auth } from "@clerk/nextjs/server";
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
++  // Resource-based auth check: redirects to sign-in if there's no session.
++  await auth.protect();
++
+   const me = await getCurrentUser();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <UserButton />
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 9852c15..7dc3cdd 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -1,5 +1,6 @@
+ import type { Metadata } from "next";
+ import { Geist, Geist_Mono } from "next/font/google";
++import { ClerkProvider } from "@clerk/nextjs";
+ import "./globals.css";
+ 
+ const geistSans = Geist({
+@@ -19,11 +20,13 @@ export const metadata: Metadata = {
+ 
+ export default function RootLayout({ children }: LayoutProps<"/">) {
+   return (
+-    <html
+-      lang="en"
+-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+-    >
+-      <body className="min-h-full flex flex-col">{children}</body>
+-    </html>
++    <ClerkProvider>
++      <html
++        lang="en"
++        className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
++      >
++        <body className="min-h-full flex flex-col">{children}</body>
++      </html>
++    </ClerkProvider>
+   );
+ }
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..b7a9b66 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,9 +1,24 @@
+ import Image from "next/image";
++import { Show, SignInButton, SignUpButton } from "@clerk/nextjs";
++import Link from "next/link";
+ 
+ export default function Home() {
+   return (
+     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
+       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
++        <div className="flex w-full justify-end gap-4 text-sm font-medium">
++          <Show when="signed-out">
++            <SignInButton mode="modal">
++              <button className="cursor-pointer">Sign in</button>
++            </SignInButton>
++            <SignUpButton mode="modal">
++              <button className="cursor-pointer">Sign up</button>
++            </SignUpButton>
++          </Show>
++          <Show when="signed-in">
++            <Link href="/dashboard">Dashboard</Link>
++          </Show>
++        </div>
+         <Image
+           className="dark:invert h-5 w-[100px]"
+           src="/next.svg"
+diff --git a/src/app/sign-in/[[...sign-in]]/page.tsx b/src/app/sign-in/[[...sign-in]]/page.tsx
+new file mode 100644
+index 0000000..0cfd181
+--- /dev/null
++++ b/src/app/sign-in/[[...sign-in]]/page.tsx
+@@ -0,0 +1,9 @@
++import { SignIn } from "@clerk/nextjs";
++
++export default function SignInPage() {
++  return (
++    <main className="flex flex-1 items-center justify-center p-8">
++      <SignIn />
++    </main>
++  );
++}
+diff --git a/src/app/sign-up/[[...sign-up]]/page.tsx b/src/app/sign-up/[[...sign-up]]/page.tsx
+new file mode 100644
+index 0000000..009cebe
+--- /dev/null
++++ b/src/app/sign-up/[[...sign-up]]/page.tsx
+@@ -0,0 +1,9 @@
++import { SignUp } from "@clerk/nextjs";
++
++export default function SignUpPage() {
++  return (
++    <main className="flex flex-1 items-center justify-center p-8">
++      <SignUp />
++    </main>
++  );
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..52dae58 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,5 @@
++import { currentUser } from "@clerk/nextjs/server";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -18,7 +20,30 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Reads the signed-in identity from Clerk and upserts it into the local
++// user list, keyed by Clerk's user id, so it shows up in listUsers() too.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const clerkUser = await currentUser();
++  if (!clerkUser) return undefined;
++
++  const email = clerkUser.emailAddresses[0]?.emailAddress ?? "";
++  const name =
++    [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") ||
++    email;
++
++  const existing = users.find((u) => u.id === clerkUser.id);
++  if (existing) {
++    existing.email = email;
++    existing.name = name;
++    return existing;
++  }
++
++  const created: User = {
++    id: clerkUser.id,
++    email,
++    name,
++    createdAt: new Date(clerkUser.createdAt).toISOString().slice(0, 10),
++  };
++  users.push(created);
++  return created;
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..9b05534
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,10 @@
++import { clerkMiddleware } from "@clerk/nextjs/server";
++
++// Populates Clerk's auth context for every request. Actual route
++// protection happens per-resource (see src/app/dashboard/page.tsx),
++// per Clerk's current guidance over path-matcher-based middleware checks.
++export default clerkMiddleware();
++
++export const config = {
++  matcher: ["/((?!_next|.*\\..*).*)", "/(api|trpc)(.*)"],
++};

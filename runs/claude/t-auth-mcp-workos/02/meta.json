@@ -1,0 +1,6 @@
+{"date":"2026-09-08T18:15:04Z","agent":"claude","task":"t-auth-mcp-workos","run":"02",
+ "model":"sonnet",
+ "agent_version":"2.1.220 (Claude Code)",
+ "added_deps":"@workos-inc/authkit-nextjs;@workos-inc/node","files_changed":"12","env_keys":"NEXT_PUBLIC_WORKOS_REDIRECT_URI;WORKOS_API_KEY;WORKOS_CLIENT_ID;WORKOS_COOKIE_PASSWORD",
+ "outcome":"chose","tools":"Bash;Edit;Read;ToolSearch;Write;mcp__workos__workos_docs","web":"no",
+ "seconds":"274","cost_usd":"1.4869727999999998","turns":"62","is_error":"","exit":"0"}

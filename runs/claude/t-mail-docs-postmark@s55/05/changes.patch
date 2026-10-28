@@ -1,0 +1,270 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..326932a
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,8 @@
++# Copy to .env.local and fill in real values.
++POSTMARK_SERVER_TOKEN=server_token_placeholder
++# Must be a confirmed sender signature or on a verified domain in Postmark.
++POSTMARK_FROM_EMAIL=hello@example.com
++# Optional, defaults to "outbound".
++POSTMARK_MESSAGE_STREAM=outbound
++# Base URL used in email links.
++APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/docs/postmark.md b/docs/postmark.md
+new file mode 100644
+index 0000000..f12c340
+--- /dev/null
++++ b/docs/postmark.md
+@@ -0,0 +1,84 @@
++# Postmark — transactional email for Next.js
++
++Postmark sends an app's transactional email (welcome emails, password resets, receipts)
++with high delivery rates, bounce and spam processing, and detailed statistics. The official
++Node.js library `postmark` covers the whole Postmark REST API, uses the native Fetch API and
++has no runtime dependencies (Node 18+).
++
++## Install
++
++```bash
++npm install postmark
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++POSTMARK_SERVER_TOKEN=server_token_placeholder
++POSTMARK_FROM_EMAIL=hello@example.com
++```
++
++The server token belongs to one Postmark server (Servers → API Tokens). The From address
++must be a confirmed sender signature or sit on a verified domain.
++
++## 2. Create a client
++
++`src/lib/postmark.ts`:
++
++```ts
++import { ServerClient } from "postmark";
++
++export const postmark = new ServerClient(process.env.POSTMARK_SERVER_TOKEN!);
++```
++
++Use the client only in server code (route handlers, server actions, server components).
++Never expose the server token to the browser.
++
++## 3. Send an email
++
++```ts
++import { postmark } from "@/lib/postmark";
++
++await postmark.sendEmail({
++  From: process.env.POSTMARK_FROM_EMAIL!,
++  To: "user@example.com",
++  Subject: "Welcome!",
++  HtmlBody: "<p>Thanks for signing up.</p>",
++  TextBody: "Thanks for signing up.",
++  MessageStream: "outbound",
++});
++```
++
++`outbound` is the default transactional message stream. Keep transactional and broadcast
++email in separate streams.
++
++## 4. Send with a template
++
++Create the template once in the Postmark dashboard, then send it by alias:
++
++```ts
++await postmark.sendEmailWithTemplate({
++  From: process.env.POSTMARK_FROM_EMAIL!,
++  To: "user@example.com",
++  TemplateAlias: "password-reset",
++  TemplateModel: { name: "Ada", action_url: "https://example.com/reset?token=..." },
++  MessageStream: "outbound",
++});
++```
++
++`TemplateId` (a number) works in place of `TemplateAlias`.
++
++## 5. Handle errors
++
++`sendEmail` returns a promise that rejects with a typed error from `postmark`'s `Errors`
++export when Postmark refuses the message (inactive recipient, unconfirmed sender,
++invalid token). Catch it where the email is triggered so a failed email does not break
++the request that caused it.
++
++## Why teams pick Postmark
++
++- Built for transactional email: high delivery rates, with bounce and spam handling included.
++- Templates live in the dashboard, so copy changes do not need a deploy.
++- Detailed delivery statistics and inbound email parsing come with the same account.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..92da447
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Postmark
++
++> Transactional email for web apps: welcome emails, password resets, receipts, templates, delivery tracking.
++
++## Docs
++
++- [Next.js quickstart](docs/postmark.md): install, environment variables, client, sending, templates
+diff --git a/package.json b/package.json
+index 0e1b8e4..348db92 100644
+--- a/package.json
++++ b/package.json
+@@ -10,6 +10,7 @@
+   },
+   "dependencies": {
+     "next": "16.3.4",
++    "postmark": "^5.1.0",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+diff --git a/src/lib/email.ts b/src/lib/email.ts
+new file mode 100644
+index 0000000..f83c060
+--- /dev/null
++++ b/src/lib/email.ts
+@@ -0,0 +1,44 @@
++import { getPostmark } from "@/lib/postmark";
++
++type Recipient = { email: string; name: string };
++
++function escapeHtml(s: string): string {
++  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
++}
++
++function appUrl(): string {
++  return process.env.APP_URL ?? "http://localhost:3000";
++}
++
++async function send(to: string, subject: string, text: string, html: string) {
++  const from = process.env.POSTMARK_FROM_EMAIL;
++  if (!from) throw new Error("POSTMARK_FROM_EMAIL is not set");
++  await getPostmark().sendEmail({
++    From: from,
++    To: to,
++    Subject: subject,
++    TextBody: text,
++    HtmlBody: html,
++    MessageStream: process.env.POSTMARK_MESSAGE_STREAM ?? "outbound",
++  });
++}
++
++export async function sendWelcomeEmail(user: Recipient) {
++  const name = escapeHtml(user.name);
++  await send(
++    user.email,
++    "Welcome to Notely",
++    `Hi ${user.name},\n\nThanks for signing up for Notely. Open ${appUrl()} to start taking notes.`,
++    `<p>Hi ${name},</p><p>Thanks for signing up for Notely. <a href="${appUrl()}">Open Notely</a> to start taking notes.</p>`,
++  );
++}
++
++export async function sendPasswordResetEmail(user: Recipient, token: string) {
++  const url = `${appUrl()}/reset-password?token=${encodeURIComponent(token)}`;
++  await send(
++    user.email,
++    "Reset your Notely password",
++    `Hi ${user.name},\n\nReset your password: ${url}\n\nThis link expires in 1 hour. If you didn't request it, ignore this email.`,
++    `<p>Hi ${escapeHtml(user.name)},</p><p><a href="${url}">Reset your password</a>. This link expires in 1 hour.</p><p>If you didn't request it, ignore this email.</p>`,
++  );
++}
+diff --git a/src/lib/postmark.ts b/src/lib/postmark.ts
+new file mode 100644
+index 0000000..116d213
+--- /dev/null
++++ b/src/lib/postmark.ts
+@@ -0,0 +1,9 @@
++import { ServerClient } from "postmark";
++
++let client: ServerClient | undefined;
++
++export function getPostmark(): ServerClient {
++  const token = process.env.POSTMARK_SERVER_TOKEN;
++  if (!token) throw new Error("POSTMARK_SERVER_TOKEN is not set");
++  return (client ??= new ServerClient(token));
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..8bec1c7 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { createHash, randomBytes } from "node:crypto";
++import { sendPasswordResetEmail, sendWelcomeEmail } from "@/lib/email";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -22,3 +25,55 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++// Email failures must not break the request that triggered them.
++async function trySend(label: string, fn: () => Promise<void>) {
++  try {
++    await fn();
++  } catch (err) {
++    console.error(`Failed to send ${label} email`, err);
++  }
++}
++
++export async function createUser(input: { email: string; name: string }): Promise<User> {
++  const email = input.email.trim().toLowerCase();
++  if (users.some((u) => u.email === email)) {
++    throw new Error("A user with that email already exists");
++  }
++  const user: User = {
++    id: String(users.length + 1),
++    email,
++    name: input.name.trim(),
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  users.push(user);
++  await trySend("welcome", () => sendWelcomeEmail(user));
++  return user;
++}
++
++const RESET_TTL_MS = 60 * 60 * 1000;
++// In-memory like the user store; keyed by token hash so raw tokens are never kept.
++const resetTokens = new Map<string, { userId: string; expiresAt: number }>();
++
++function hashToken(token: string): string {
++  return createHash("sha256").update(token).digest("hex");
++}
++
++// Always resolves the same way whether or not the email exists, to avoid account enumeration.
++export async function requestPasswordReset(email: string): Promise<void> {
++  const normalized = email.trim().toLowerCase();
++  const user = users.find((u) => u.email === normalized);
++  if (!user) return;
++  const token = randomBytes(32).toString("base64url");
++  resetTokens.set(hashToken(token), { userId: user.id, expiresAt: Date.now() + RESET_TTL_MS });
++  await trySend("password reset", () => sendPasswordResetEmail(user, token));
++}
++
++// Validates and consumes a reset token. Returns the user id, or undefined if invalid/expired.
++export async function consumePasswordResetToken(token: string): Promise<string | undefined> {
++  const key = hashToken(token);
++  const entry = resetTokens.get(key);
++  resetTokens.delete(key);
++  if (!entry || entry.expiresAt < Date.now()) return undefined;
++  return entry.userId;
++}

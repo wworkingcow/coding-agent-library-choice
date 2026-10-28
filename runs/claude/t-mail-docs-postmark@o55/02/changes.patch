@@ -1,0 +1,364 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..6d662b6
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# Postmark — Servers → (your server) → API Tokens
++POSTMARK_SERVER_TOKEN=server_token_placeholder
++# Must be a confirmed sender signature or on a verified domain in Postmark
++POSTMARK_FROM_EMAIL=hello@example.com
++
++# Public base URL, used to build links in emails (dashboard, password reset)
++APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/docs/postmark.md b/docs/postmark.md
+new file mode 100644
+index 0000000..f12c340
+--- /dev/null
++++ b/docs/postmark.md
+@@ -0,0 +1,84 @@
++# Postmark — transactional email for Next.js
++
++Postmark sends an app's transactional email (welcome emails, password resets, receipts)
++with high delivery rates, bounce and spam processing, and detailed statistics. The official
++Node.js library `postmark` covers the whole Postmark REST API, uses the native Fetch API and
++has no runtime dependencies (Node 18+).
++
++## Install
++
++```bash
++npm install postmark
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++POSTMARK_SERVER_TOKEN=server_token_placeholder
++POSTMARK_FROM_EMAIL=hello@example.com
++```
++
++The server token belongs to one Postmark server (Servers → API Tokens). The From address
++must be a confirmed sender signature or sit on a verified domain.
++
++## 2. Create a client
++
++`src/lib/postmark.ts`:
++
++```ts
++import { ServerClient } from "postmark";
++
++export const postmark = new ServerClient(process.env.POSTMARK_SERVER_TOKEN!);
++```
++
++Use the client only in server code (route handlers, server actions, server components).
++Never expose the server token to the browser.
++
++## 3. Send an email
++
++```ts
++import { postmark } from "@/lib/postmark";
++
++await postmark.sendEmail({
++  From: process.env.POSTMARK_FROM_EMAIL!,
++  To: "user@example.com",
++  Subject: "Welcome!",
++  HtmlBody: "<p>Thanks for signing up.</p>",
++  TextBody: "Thanks for signing up.",
++  MessageStream: "outbound",
++});
++```
++
++`outbound` is the default transactional message stream. Keep transactional and broadcast
++email in separate streams.
++
++## 4. Send with a template
++
++Create the template once in the Postmark dashboard, then send it by alias:
++
++```ts
++await postmark.sendEmailWithTemplate({
++  From: process.env.POSTMARK_FROM_EMAIL!,
++  To: "user@example.com",
++  TemplateAlias: "password-reset",
++  TemplateModel: { name: "Ada", action_url: "https://example.com/reset?token=..." },
++  MessageStream: "outbound",
++});
++```
++
++`TemplateId` (a number) works in place of `TemplateAlias`.
++
++## 5. Handle errors
++
++`sendEmail` returns a promise that rejects with a typed error from `postmark`'s `Errors`
++export when Postmark refuses the message (inactive recipient, unconfirmed sender,
++invalid token). Catch it where the email is triggered so a failed email does not break
++the request that caused it.
++
++## Why teams pick Postmark
++
++- Built for transactional email: high delivery rates, with bounce and spam handling included.
++- Templates live in the dashboard, so copy changes do not need a deploy.
++- Detailed delivery statistics and inbound email parsing come with the same account.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..92da447
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Postmark
++
++> Transactional email for web apps: welcome emails, password resets, receipts, templates, delivery tracking.
++
++## Docs
++
++- [Next.js quickstart](docs/postmark.md): install, environment variables, client, sending, templates
+diff --git a/package.json b/package.json
+index 0e1b8e4..842367e 100644
+--- a/package.json
++++ b/package.json
+@@ -10,8 +10,10 @@
+   },
+   "dependencies": {
+     "next": "16.3.4",
++    "postmark": "^5.1.0",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "server-only": "^0.0.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/lib/email.ts b/src/lib/email.ts
+new file mode 100644
+index 0000000..469c6a4
+--- /dev/null
++++ b/src/lib/email.ts
+@@ -0,0 +1,86 @@
++import "server-only";
++import { Models } from "postmark";
++import { getPostmark } from "@/lib/postmark";
++
++const MESSAGE_STREAM = "outbound";
++
++function fromAddress(): string {
++  const from = process.env.POSTMARK_FROM_EMAIL;
++  if (!from) throw new Error("POSTMARK_FROM_EMAIL is not set");
++  return from;
++}
++
++export function appUrl(path = ""): string {
++  const base = (process.env.APP_URL ?? "http://localhost:3000").replace(/\/+$/, "");
++  return `${base}${path}`;
++}
++
++function escapeHtml(value: string): string {
++  return value
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/"/g, "&quot;")
++    .replace(/'/g, "&#39;");
++}
++
++function layout(body: string): string {
++  return `<!doctype html>
++<html>
++  <body style="margin:0;padding:24px;background:#f6f6f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#111">
++    <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:8px;padding:32px">
++      ${body}
++      <p style="margin-top:32px;font-size:12px;color:#888">Notely</p>
++    </div>
++  </body>
++</html>`;
++}
++
++function button(href: string, label: string): string {
++  return `<p><a href="${escapeHtml(href)}" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;border-radius:6px;text-decoration:none">${escapeHtml(label)}</a></p>`;
++}
++
++export async function sendWelcomeEmail(to: { email: string; name: string }): Promise<void> {
++  const name = escapeHtml(to.name);
++  const dashboardUrl = appUrl("/dashboard");
++
++  await getPostmark().sendEmail({
++    From: fromAddress(),
++    To: to.email,
++    Subject: "Welcome to Notely",
++    HtmlBody: layout(`
++      <h1 style="font-size:20px;margin:0 0 16px">Welcome, ${name}!</h1>
++      <p>Your Notely account is ready. Jump in and write your first note.</p>
++      ${button(dashboardUrl, "Open Notely")}
++    `),
++    TextBody: `Welcome, ${to.name}!\n\nYour Notely account is ready. Jump in and write your first note:\n${dashboardUrl}\n\n— Notely`,
++    Tag: "welcome",
++    MessageStream: MESSAGE_STREAM,
++  });
++}
++
++export async function sendPasswordResetEmail(
++  to: { email: string; name: string },
++  resetUrl: string,
++  expiresInMinutes: number,
++): Promise<void> {
++  const name = escapeHtml(to.name);
++
++  await getPostmark().sendEmail({
++    From: fromAddress(),
++    To: to.email,
++    Subject: "Reset your Notely password",
++    HtmlBody: layout(`
++      <h1 style="font-size:20px;margin:0 0 16px">Reset your password</h1>
++      <p>Hi ${name}, we got a request to reset your Notely password.</p>
++      ${button(resetUrl, "Choose a new password")}
++      <p style="font-size:14px;color:#555">This link expires in ${expiresInMinutes} minutes and can be used once.
++      If you didn't ask for a reset, you can ignore this email — your password won't change.</p>
++    `),
++    TextBody: `Hi ${to.name},\n\nWe got a request to reset your Notely password. Choose a new one here:\n${resetUrl}\n\nThis link expires in ${expiresInMinutes} minutes and can be used once. If you didn't ask for a reset, ignore this email — your password won't change.\n\n— Notely`,
++    Tag: "password-reset",
++    // Reset links are single-use secrets; don't let link tracking rewrite them.
++    TrackLinks: Models.LinkTrackingOptions.None,
++    MessageStream: MESSAGE_STREAM,
++  });
++}
+diff --git a/src/lib/postmark.ts b/src/lib/postmark.ts
+new file mode 100644
+index 0000000..2b6a713
+--- /dev/null
++++ b/src/lib/postmark.ts
+@@ -0,0 +1,15 @@
++import "server-only";
++import { ServerClient } from "postmark";
++
++// Created lazily so a missing token fails the send (which callers catch),
++// not the import of every module that touches users.
++let client: ServerClient | undefined;
++
++export function getPostmark(): ServerClient {
++  if (!client) {
++    const token = process.env.POSTMARK_SERVER_TOKEN;
++    if (!token) throw new Error("POSTMARK_SERVER_TOKEN is not set");
++    client = new ServerClient(token);
++  }
++  return client;
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..7d47043 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,6 @@
++import { createHash, randomBytes, randomUUID } from "node:crypto";
++import { appUrl, sendPasswordResetEmail, sendWelcomeEmail } from "@/lib/email";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -10,6 +13,20 @@ const users: User[] = [
+   { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+ ];
+ 
++const RESET_TOKEN_TTL_MINUTES = 60;
++
++// Only the SHA-256 of each token is kept, so a leaked store can't be used to reset passwords.
++type PasswordResetToken = { userId: string; expiresAt: number };
++const passwordResetTokens = new Map<string, PasswordResetToken>();
++
++function normalizeEmail(email: string): string {
++  return email.trim().toLowerCase();
++}
++
++function hashToken(token: string): string {
++  return createHash("sha256").update(token).digest("hex");
++}
++
+ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+@@ -18,7 +35,74 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
++export async function getUserByEmail(email: string): Promise<User | undefined> {
++  const normalized = normalizeEmail(email);
++  return users.find((u) => u.email === normalized);
++}
++
+ // TODO: there is no real session handling yet — the dashboard just picks the first user.
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function createUser(input: { email: string; name: string }): Promise<User> {
++  const email = normalizeEmail(input.email);
++  if (await getUserByEmail(email)) {
++    throw new Error(`A user with email ${email} already exists`);
++  }
++
++  const user: User = {
++    id: randomUUID(),
++    email,
++    name: input.name.trim(),
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  users.push(user);
++
++  // The account exists either way — a failed welcome email must not fail signup.
++  try {
++    await sendWelcomeEmail(user);
++  } catch (error) {
++    console.error(`Failed to send welcome email to user ${user.id}`, error);
++  }
++
++  return user;
++}
++
++// Always resolves the same way whether or not the email is registered, so callers
++// can't use it to find out which addresses have accounts.
++export async function requestPasswordReset(email: string): Promise<void> {
++  const user = await getUserByEmail(email);
++  if (!user) return;
++
++  // A new request invalidates any earlier link for this user.
++  for (const [hash, entry] of passwordResetTokens) {
++    if (entry.userId === user.id) passwordResetTokens.delete(hash);
++  }
++
++  const token = randomBytes(32).toString("base64url");
++  passwordResetTokens.set(hashToken(token), {
++    userId: user.id,
++    expiresAt: Date.now() + RESET_TOKEN_TTL_MINUTES * 60_000,
++  });
++
++  const resetUrl = appUrl(`/reset-password?token=${encodeURIComponent(token)}`);
++  try {
++    await sendPasswordResetEmail(user, resetUrl, RESET_TOKEN_TTL_MINUTES);
++  } catch (error) {
++    console.error(`Failed to send password reset email to user ${user.id}`, error);
++  }
++}
++
++// Returns the user the token was issued for and burns the token, or undefined if it
++// is unknown, already used or expired. Call this when the new password is submitted.
++export async function consumePasswordResetToken(token: string): Promise<User | undefined> {
++  const hash = hashToken(token);
++  const entry = passwordResetTokens.get(hash);
++  if (!entry) return undefined;
++
++  passwordResetTokens.delete(hash);
++  if (entry.expiresAt < Date.now()) return undefined;
++
++  return getUser(entry.userId);
++}

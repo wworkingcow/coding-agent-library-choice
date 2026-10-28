@@ -1,0 +1,241 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..125cb99
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# Stripe (use test-mode keys while developing)
++STRIPE_SECRET_KEY=sk_test_replace_me
++# Recurring monthly price for the Pro plan (Stripe dashboard -> Products)
++STRIPE_PRO_PRICE_ID=price_replace_me
++# From `stripe listen --forward-to localhost:3000/api/webhooks/stripe` or the dashboard endpoint
++STRIPE_WEBHOOK_SECRET=whsec_replace_me
++NEXT_PUBLIC_APP_URL=http://localhost:3000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/package.json b/package.json
+index 0e1b8e4..670ec6f 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+   "dependencies": {
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "stripe": "^23.0.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/app/api/webhooks/stripe/route.ts b/src/app/api/webhooks/stripe/route.ts
+new file mode 100644
+index 0000000..8ac75ba
+--- /dev/null
++++ b/src/app/api/webhooks/stripe/route.ts
+@@ -0,0 +1,61 @@
++import type Stripe from "stripe";
++import { getStripe } from "@/lib/stripe";
++import { getUserByStripeCustomerId, updateUserBilling } from "@/lib/users";
++
++export const runtime = "nodejs";
++
++const ACTIVE = new Set(["active", "trialing"]);
++
++function customerId(c: string | Stripe.Customer | Stripe.DeletedCustomer | null) {
++  return typeof c === "string" ? c : c?.id;
++}
++
++export async function POST(request: Request) {
++  const secret = process.env.STRIPE_WEBHOOK_SECRET;
++  const signature = request.headers.get("stripe-signature");
++  if (!secret || !signature) {
++    return new Response("Webhook not configured", { status: 400 });
++  }
++
++  // Signature verification needs the raw, unparsed body.
++  const body = await request.text();
++  let event: Stripe.Event;
++  try {
++    event = getStripe().webhooks.constructEvent(body, signature, secret);
++  } catch {
++    return new Response("Invalid signature", { status: 400 });
++  }
++
++  switch (event.type) {
++    case "checkout.session.completed":
++    case "checkout.session.async_payment_succeeded": {
++      const session = event.data.object;
++      if (session.mode !== "subscription" || session.payment_status !== "paid") break;
++      const userId = session.client_reference_id;
++      if (!userId) break;
++      await updateUserBilling(userId, {
++        plan: "pro",
++        stripeCustomerId: customerId(session.customer),
++        stripeSubscriptionId:
++          typeof session.subscription === "string"
++            ? session.subscription
++            : session.subscription?.id,
++      });
++      break;
++    }
++    case "customer.subscription.updated":
++    case "customer.subscription.deleted": {
++      const sub = event.data.object;
++      const cid = customerId(sub.customer);
++      const user = cid ? await getUserByStripeCustomerId(cid) : undefined;
++      // Ignore events for a subscription other than the one we track.
++      if (!user || user.stripeSubscriptionId !== sub.id) break;
++      await updateUserBilling(user.id, {
++        plan: ACTIVE.has(sub.status) ? "pro" : "free",
++      });
++      break;
++    }
++  }
++
++  return Response.json({ received: true });
++}
+diff --git a/src/app/dashboard/actions.ts b/src/app/dashboard/actions.ts
+new file mode 100644
+index 0000000..8c0ec72
+--- /dev/null
++++ b/src/app/dashboard/actions.ts
+@@ -0,0 +1,30 @@
++"use server";
++
++import { redirect } from "next/navigation";
++import { appUrl, getStripe } from "@/lib/stripe";
++import { getCurrentUser } from "@/lib/users";
++
++export async function startCheckout() {
++  const user = await getCurrentUser();
++  if (!user) redirect("/");
++  if (user.plan === "pro") redirect("/dashboard");
++
++  const priceId = process.env.STRIPE_PRO_PRICE_ID;
++  if (!priceId) throw new Error("STRIPE_PRO_PRICE_ID is not set");
++
++  const session = await getStripe().checkout.sessions.create({
++    mode: "subscription",
++    line_items: [{ price: priceId, quantity: 1 }],
++    client_reference_id: user.id,
++    // Reuse the Stripe customer if we have one, otherwise let Checkout create it.
++    ...(user.stripeCustomerId
++      ? { customer: user.stripeCustomerId }
++      : { customer_email: user.email }),
++    subscription_data: { metadata: { userId: user.id } },
++    success_url: `${appUrl()}/dashboard?checkout=success`,
++    cancel_url: `${appUrl()}/dashboard?checkout=canceled`,
++  });
++
++  if (!session.url) throw new Error("Stripe did not return a checkout URL");
++  redirect(session.url);
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..5aec429 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,6 +1,10 @@
++import { connection } from "next/server";
++import { startCheckout } from "./actions";
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
++  // Plan changes via webhook, so render per request instead of prerendering.
++  await connection();
+   const me = await getCurrentUser();
+   const all = await listUsers();
+ 
+@@ -11,6 +15,21 @@ export default async function DashboardPage() {
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+ 
++      <h2 className="mt-8 text-lg font-medium">Plan</h2>
++      {me?.plan === "pro" ? (
++        <p className="mt-2 text-sm">You&apos;re on Pro. Thanks for subscribing!</p>
++      ) : (
++        <form action={startCheckout} className="mt-2">
++          <p className="text-sm opacity-70">You&apos;re on the Free plan.</p>
++          <button
++            type="submit"
++            className="mt-2 rounded bg-black px-4 py-2 text-sm text-white dark:bg-white dark:text-black"
++          >
++            Upgrade to Pro
++          </button>
++        </form>
++      )}
++
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+         {all.map((u) => (
+diff --git a/src/lib/stripe.ts b/src/lib/stripe.ts
+new file mode 100644
+index 0000000..9ee549e
+--- /dev/null
++++ b/src/lib/stripe.ts
+@@ -0,0 +1,16 @@
++import Stripe from "stripe";
++
++let client: Stripe | undefined;
++
++export function getStripe(): Stripe {
++  if (!client) {
++    const key = process.env.STRIPE_SECRET_KEY;
++    if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
++    client = new Stripe(key);
++  }
++  return client;
++}
++
++export function appUrl(): string {
++  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..b7b6882 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -3,11 +3,16 @@ export type User = {
+   email: string;
+   name: string;
+   createdAt: string;
++  plan: Plan;
++  stripeCustomerId?: string;
++  stripeSubscriptionId?: string;
+ };
+ 
++export type Plan = "free" | "pro";
++
+ const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04", plan: "free" },
++  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11", plan: "free" },
+ ];
+ 
+ export async function listUsers(): Promise<User[]> {
+@@ -22,3 +27,19 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function getUserByStripeCustomerId(
++  customerId: string,
++): Promise<User | undefined> {
++  return users.find((u) => u.stripeCustomerId === customerId);
++}
++
++// NOTE: users live in memory, so plan changes are lost on restart. Swap this for a DB write.
++export async function updateUserBilling(
++  id: string,
++  patch: Partial<Pick<User, "plan" | "stripeCustomerId" | "stripeSubscriptionId">>,
++): Promise<User | undefined> {
++  const user = users.find((u) => u.id === id);
++  if (user) Object.assign(user, patch);
++  return user;
++}

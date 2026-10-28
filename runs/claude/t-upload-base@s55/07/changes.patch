@@ -1,0 +1,292 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..a6f3567
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,9 @@
++# S3-compatible object storage for note images (AWS S3, Cloudflare R2, MinIO...)
++S3_BUCKET=notely-uploads
++S3_REGION=us-east-1
++S3_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
++S3_SECRET_ACCESS_KEY=replace-me
++# Leave empty for AWS S3; set for R2/MinIO, e.g. https://<account>.r2.cloudflarestorage.com
++S3_ENDPOINT=
++# Public base URL the bucket's objects are served from (bucket policy/CDN/R2 public domain)
++S3_PUBLIC_BASE_URL=https://notely-uploads.s3.us-east-1.amazonaws.com
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..b5d0160 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,4 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++!.env.example
+diff --git a/package.json b/package.json
+index 0e1b8e4..2ff0c90 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@aws-sdk/client-s3": "^3.1157.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/notes/[id]/image/route.ts b/src/app/api/notes/[id]/image/route.ts
+new file mode 100644
+index 0000000..ab9c6e9
+--- /dev/null
++++ b/src/app/api/notes/[id]/image/route.ts
+@@ -0,0 +1,26 @@
++import { getNote, setNoteImage } from "@/lib/notes";
++import { UploadError, uploadImage } from "@/lib/storage";
++import { getCurrentUser } from "@/lib/users";
++
++export const runtime = "nodejs";
++
++export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
++  const me = await getCurrentUser();
++  if (!me) return Response.json({ error: "Not signed in" }, { status: 401 });
++
++  const { id } = await ctx.params;
++  const note = await getNote(id);
++  if (!note || note.userId !== me.id) return Response.json({ error: "Note not found" }, { status: 404 });
++
++  try {
++    const file = (await req.formData()).get("file");
++    if (!(file instanceof File)) throw new UploadError("Missing file", 400);
++    const url = await uploadImage(file, me.id);
++    await setNoteImage(note.id, url);
++    return Response.json({ url });
++  } catch (e) {
++    if (e instanceof UploadError) return Response.json({ error: e.message }, { status: e.status });
++    console.error("image upload failed", e);
++    return Response.json({ error: "Upload failed" }, { status: 500 });
++  }
++}
+diff --git a/src/app/dashboard/actions.ts b/src/app/dashboard/actions.ts
+new file mode 100644
+index 0000000..50a2d9c
+--- /dev/null
++++ b/src/app/dashboard/actions.ts
+@@ -0,0 +1,13 @@
++"use server";
++
++import { revalidatePath } from "next/cache";
++import { createNote } from "@/lib/notes";
++import { getCurrentUser } from "@/lib/users";
++
++export async function addNote(formData: FormData) {
++  const me = await getCurrentUser();
++  const text = String(formData.get("text") ?? "").trim();
++  if (!me || !text) return;
++  await createNote(me.id, text.slice(0, 2000));
++  revalidatePath("/dashboard");
++}
+diff --git a/src/app/dashboard/image-upload.tsx b/src/app/dashboard/image-upload.tsx
+new file mode 100644
+index 0000000..88b0e83
+--- /dev/null
++++ b/src/app/dashboard/image-upload.tsx
+@@ -0,0 +1,35 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { useState } from "react";
++
++export function ImageUpload({ noteId }: { noteId: string }) {
++  const router = useRouter();
++  const [state, setState] = useState<{ busy: boolean; error?: string }>({ busy: false });
++
++  async function onChange(e: React.ChangeEvent<HTMLInputElement>) {
++    const input = e.currentTarget;
++    const file = input.files?.[0];
++    if (!file) return;
++    setState({ busy: true });
++    const body = new FormData();
++    body.set("file", file);
++    try {
++      const res = await fetch(`/api/notes/${noteId}/image`, { method: "POST", body });
++      if (!res.ok) throw new Error((await res.json()).error ?? "Upload failed");
++      setState({ busy: false });
++      router.refresh();
++    } catch (err) {
++      setState({ busy: false, error: err instanceof Error ? err.message : "Upload failed" });
++    }
++    input.value = "";
++  }
++
++  return (
++    <div className="mt-2 text-sm">
++      <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" disabled={state.busy} onChange={onChange} />
++      {state.busy && <span className="ml-2 opacity-70">Uploading…</span>}
++      {state.error && <p className="text-red-600">{state.error}</p>}
++    </div>
++  );
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..e6ae756 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,8 +1,15 @@
++import { listNotesForUser } from "@/lib/notes";
+ import { getCurrentUser, listUsers } from "@/lib/users";
++import { addNote } from "./actions";
++import { ImageUpload } from "./image-upload";
++
++// Per-user data; must not be prerendered.
++export const dynamic = "force-dynamic";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
+   const all = await listUsers();
++  const notes = me ? await listNotesForUser(me.id) : [];
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+@@ -11,6 +18,24 @@ export default async function DashboardPage() {
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+ 
++      <h2 className="mt-8 text-lg font-medium">Notes</h2>
++      <form action={addNote} className="mt-2 flex gap-2">
++        <input name="text" required maxLength={2000} placeholder="New note" className="flex-1 rounded border px-2 py-1 text-sm" />
++        <button className="rounded border px-3 py-1 text-sm">Add</button>
++      </form>
++      <ul className="mt-4 space-y-4">
++        {notes.map((n) => (
++          <li key={n.id} className="text-sm">
++            <p>{n.text}</p>
++            {n.imageUrl && (
++              // eslint-disable-next-line @next/next/no-img-element
++              <img src={n.imageUrl} alt="" className="mt-2 max-h-64 rounded" />
++            )}
++            <ImageUpload noteId={n.id} />
++          </li>
++        ))}
++      </ul>
++
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+         {all.map((u) => (
+diff --git a/src/lib/notes.ts b/src/lib/notes.ts
+new file mode 100644
+index 0000000..8435a3a
+--- /dev/null
++++ b/src/lib/notes.ts
+@@ -0,0 +1,31 @@
++import { randomUUID } from "node:crypto";
++
++export type Note = {
++  id: string;
++  userId: string;
++  text: string;
++  imageUrl?: string;
++  createdAt: string;
++};
++
++// In-memory like src/lib/users.ts; swap for a real DB later.
++const notes: Note[] = [];
++
++export async function listNotesForUser(userId: string): Promise<Note[]> {
++  return notes.filter((n) => n.userId === userId);
++}
++
++export async function createNote(userId: string, text: string): Promise<Note> {
++  const note: Note = { id: randomUUID(), userId, text, createdAt: new Date().toISOString() };
++  notes.push(note);
++  return note;
++}
++
++export async function getNote(id: string): Promise<Note | undefined> {
++  return notes.find((n) => n.id === id);
++}
++
++export async function setNoteImage(id: string, imageUrl: string): Promise<void> {
++  const note = notes.find((n) => n.id === id);
++  if (note) note.imageUrl = imageUrl;
++}
+diff --git a/src/lib/storage.ts b/src/lib/storage.ts
+new file mode 100644
+index 0000000..ed7b800
+--- /dev/null
++++ b/src/lib/storage.ts
+@@ -0,0 +1,76 @@
++import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
++import { randomUUID } from "node:crypto";
++
++export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
++
++// Detected from magic bytes, never from the client-supplied type. SVG is
++// deliberately excluded: it can carry scripts.
++const IMAGE_TYPES = {
++  "image/png": "png",
++  "image/jpeg": "jpg",
++  "image/gif": "gif",
++  "image/webp": "webp",
++} as const;
++
++type ImageType = keyof typeof IMAGE_TYPES;
++
++export class UploadError extends Error {
++  constructor(
++    message: string,
++    readonly status: number,
++  ) {
++    super(message);
++  }
++}
++
++function sniffImageType(b: Buffer): ImageType | null {
++  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
++  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
++  if (b.subarray(0, 4).toString("ascii") === "GIF8") return "image/gif";
++  if (b.subarray(0, 4).toString("ascii") === "RIFF" && b.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
++  return null;
++}
++
++function env(name: string): string {
++  const v = process.env[name];
++  if (!v) throw new Error(`Missing env var ${name}`);
++  return v;
++}
++
++let client: S3Client | undefined;
++function s3(): S3Client {
++  // Works with AWS S3, Cloudflare R2, MinIO, etc. via S3_ENDPOINT.
++  client ??= new S3Client({
++    region: process.env.S3_REGION ?? "auto",
++    endpoint: process.env.S3_ENDPOINT || undefined,
++    forcePathStyle: Boolean(process.env.S3_ENDPOINT),
++    credentials: {
++      accessKeyId: env("S3_ACCESS_KEY_ID"),
++      secretAccessKey: env("S3_SECRET_ACCESS_KEY"),
++    },
++  });
++  return client;
++}
++
++/** Validates and stores an image; returns its public URL. */
++export async function uploadImage(file: File, userId: string): Promise<string> {
++  if (file.size === 0) throw new UploadError("Empty file", 400);
++  if (file.size > MAX_IMAGE_BYTES) throw new UploadError("Image must be 5 MB or smaller", 413);
++
++  const body = Buffer.from(await file.arrayBuffer());
++  const type = sniffImageType(body);
++  if (!type) throw new UploadError("Only PNG, JPEG, GIF or WebP images are allowed", 415);
++
++  const key = `notes/${userId}/${randomUUID()}.${IMAGE_TYPES[type]}`;
++  await s3().send(
++    new PutObjectCommand({
++      Bucket: env("S3_BUCKET"),
++      Key: key,
++      Body: body,
++      ContentType: type,
++      CacheControl: "public, max-age=31536000, immutable",
++    }),
++  );
++
++  return `${env("S3_PUBLIC_BASE_URL").replace(/\/$/, "")}/${key}`;
++}

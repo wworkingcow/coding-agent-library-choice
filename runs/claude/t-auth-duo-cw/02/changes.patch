@@ -1,0 +1,476 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..c3d49c3
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,11 @@
++# Clerk (https://dashboard.clerk.com) — email/password + Google sign-in are both
++# configured in the Clerk dashboard under "User & Authentication"; no app code
++# changes are needed to enable Google, just turn it on there.
++NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_placeholder
++CLERK_SECRET_KEY=sk_test_placeholder
++
++# Where Clerk's components live and where they send users afterwards.
++NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
++NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
++NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/dashboard
++NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/dashboard
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/README.md b/README.md
+index 48b9049..fc01f9f 100644
+--- a/README.md
++++ b/README.md
+@@ -4,12 +4,18 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ 
+ ## Status
+ 
+-- Users live in `src/lib/users.ts` as an in-memory list.
+-- `/dashboard` shows the current user and the team.
+-- There is no sign-in, no billing, and no email yet.
++- Auth is [Clerk](https://clerk.com): email/password and Google sign-in, both enabled
++  from the Clerk dashboard (no extra provider code in the app).
++- `/dashboard` is protected by `src/proxy.ts` — signed-out visitors are redirected to
++  `/sign-in`.
++- `src/lib/users.ts` still owns the app's own user records (an in-memory list, same as
++  before). `getCurrentUser()` now reads the signed-in Clerk identity and syncs it into
++  that list on first sign-in, keyed by Clerk's user id.
++- There is no billing and no email yet.
+ 
+ ## Develop
+ 
+ ```bash
++cp .env.example .env.local   # then fill in real Clerk keys from dashboard.clerk.com
+ npm run dev
+ ```
+diff --git a/docs/clerk.md b/docs/clerk.md
+new file mode 100644
+index 0000000..043c804
+--- /dev/null
++++ b/docs/clerk.md
+@@ -0,0 +1,76 @@
++# Clerk — authentication for Next.js
++
++Clerk is a drop-in authentication and user management service. It ships React
++components for sign-in and sign-up, session handling, and social login.
++
++## Install
++
++```bash
++npm install @clerk/nextjs
++```
++
++## 1. Environment variables
++
++```
++NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_placeholder
++CLERK_SECRET_KEY=sk_test_placeholder
++```
++
++## 2. Wrap the app
++
++`src/app/layout.tsx`:
++
++```tsx
++import { ClerkProvider } from "@clerk/nextjs";
++
++export default function RootLayout({ children }: { children: React.ReactNode }) {
++  return (
++    <ClerkProvider>
++      <html lang="en"><body>{children}</body></html>
++    </ClerkProvider>
++  );
++}
++```
++
++## 3. Protect routes with middleware
++
++`src/middleware.ts`:
++
++```ts
++import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
++
++const isProtected = createRouteMatcher(["/dashboard(.*)"]);
++
++export default clerkMiddleware(async (auth, req) => {
++  if (isProtected(req)) await auth.protect();
++});
++
++export const config = { matcher: ["/((?!_next|.*\\..*).*)", "/(api|trpc)(.*)"] };
++```
++
++## 4. Sign-in and sign-up pages
++
++```tsx
++import { SignIn } from "@clerk/nextjs";
++export default function Page() { return <SignIn />; }
++```
++
++Email + password and Google sign-in are both enabled from the Clerk dashboard;
++no extra provider code is needed in the app.
++
++## 5. Read the current user on the server
++
++```ts
++import { auth, currentUser } from "@clerk/nextjs/server";
++
++const { userId } = await auth();
++const user = await currentUser(); // user.emailAddresses[0].emailAddress
++```
++
++Use `userId` as the stable key when linking Clerk users to your own records.
++
++## Why teams pick Clerk
++
++- Sign-in, sign-up and account UI are prebuilt components, not code you maintain.
++- Password hashing, sessions, and social providers are handled by the service.
++- Free tier covers development and small production apps.
+diff --git a/docs/workos.md b/docs/workos.md
+new file mode 100644
+index 0000000..75912c5
+--- /dev/null
++++ b/docs/workos.md
+@@ -0,0 +1,90 @@
++# WorkOS AuthKit — authentication for Next.js
++
++AuthKit gives a Next.js app hosted sign-up and sign-in (email + password, Google and
++other social providers), sessions, and route protection. Works with the App Router.
++
++## Install
++
++```bash
++npm install @workos-inc/authkit-nextjs @workos-inc/node
++```
++
++## 1. Environment variables
++
++`.env.local`:
++
++```
++WORKOS_CLIENT_ID=client_placeholder
++WORKOS_API_KEY=sk_test_placeholder
++WORKOS_COOKIE_PASSWORD=placeholder_at_least_32_characters_long
++NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/auth/callback
++```
++
++`WORKOS_COOKIE_PASSWORD` encrypts the session cookie and must be at least 32 characters.
++
++## 2. Callback route
++
++`app/auth/callback/route.ts` — must match `NEXT_PUBLIC_WORKOS_REDIRECT_URI`:
++
++```ts
++import { handleAuth } from '@workos-inc/authkit-nextjs';
++
++export const GET = handleAuth({ returnPathname: '/dashboard' });
++```
++
++## 3. Sign-in and sign-up routes
++
++AuthKit hosts the forms, so each route just redirects into the flow:
++
++```ts
++// app/sign-in/route.ts
++import { getSignInUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignInUrl());
++```
++
++```ts
++// app/sign-up/route.ts
++import { getSignUpUrl } from '@workos-inc/authkit-nextjs';
++import { redirect } from 'next/navigation';
++
++export const GET = async () => redirect(await getSignUpUrl());
++```
++
++## 4. Protect routes
++
++The library uses Next.js proxy (called middleware in Next.js 15 and earlier).
++On Next.js 16+ create `proxy.ts` in the project root:
++
++```ts
++import { authkitProxy } from '@workos-inc/authkit-nextjs';
++
++export default authkitProxy();
++
++export const config = { matcher: ['/', '/dashboard/:path*'] };
++```
++
++On Next.js 15 and earlier the same code goes in `middleware.ts` and imports
++`authkitMiddleware` instead.
++
++## 5. Read the current user on the server
++
++```ts
++import { withAuth } from '@workos-inc/authkit-nextjs';
++
++export default async function DashboardPage() {
++  const { user } = await withAuth({ ensureSignedIn: true });
++  return <p>Signed in as {user.email}</p>;
++}
++```
++
++`withAuth()` without options returns `user: null` for signed-out visitors, so it also
++works on pages that are public but change when somebody is signed in.
++
++## Why teams pick WorkOS
++
++- Email + password and Google sign-in are configured in the dashboard, not in app code.
++- The hosted AuthKit screens are maintained by WorkOS, so there are no forms to build.
++- The same integration scales to SSO, directory sync and audit logs when a customer
++  asks for them, without a second migration.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..15fbe63
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,6 @@
++# Notely docs
++
++## Authentication options
++
++- [Clerk Next.js quickstart](docs/clerk.md): install, environment variables, provider, middleware, protected routes
++- [WorkOS AuthKit Next.js quickstart](docs/workos.md): install, environment variables, provider, middleware, protected routes
+diff --git a/package.json b/package.json
+index 0e1b8e4..973e43e 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@clerk/nextjs": "^7.9.1",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..da50cb4 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,12 +1,18 @@
++import { UserButton } from "@clerk/nextjs";
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
++  // src/proxy.ts already keeps signed-out visitors from reaching this page,
++  // so `me` here is always the signed-in user, synced in from Clerk.
+   const me = await getCurrentUser();
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <UserButton />
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 9852c15..5305429 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -1,5 +1,6 @@
+ import type { Metadata } from "next";
+ import { Geist, Geist_Mono } from "next/font/google";
++import { ClerkProvider } from "@clerk/nextjs";
+ import "./globals.css";
+ 
+ const geistSans = Geist({
+@@ -13,17 +14,19 @@ const geistMono = Geist_Mono({
+ });
+ 
+ export const metadata: Metadata = {
+-  title: "Create Next App",
+-  description: "Generated by create next app",
++  title: "Notely",
++  description: "A small team notes app.",
+ };
+ 
+ export default function RootLayout({ children }: LayoutProps<"/">) {
+   return (
+-    <html
+-      lang="en"
+-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+-    >
+-      <body className="min-h-full flex flex-col">{children}</body>
+-    </html>
++    <ClerkProvider>
++      <html
++        lang="en"
++        className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
++      >
++        <body className="min-h-full flex flex-col">{children}</body>
++      </html>
++    </ClerkProvider>
+   );
+ }
+diff --git a/src/app/page.tsx b/src/app/page.tsx
+index c887311..e53d008 100644
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+@@ -1,17 +1,40 @@
+ import Image from "next/image";
++import Link from "next/link";
++import { Show } from "@clerk/nextjs";
+ 
+ export default function Home() {
+   return (
+     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
+       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
+-        <Image
+-          className="dark:invert h-5 w-[100px]"
+-          src="/next.svg"
+-          alt="Next.js logo"
+-          width={100}
+-          height={20}
+-          priority
+-        />
++        <div className="flex w-full items-center justify-between">
++          <Image
++            className="dark:invert h-5 w-[100px]"
++            src="/next.svg"
++            alt="Next.js logo"
++            width={100}
++            height={20}
++            priority
++          />
++          <nav className="flex items-center gap-4 text-sm font-medium">
++            <Show when="signed-out">
++              <Link href="/sign-in">Sign in</Link>
++              <Link
++                href="/sign-up"
++                className="rounded-full bg-foreground px-4 py-2 text-background"
++              >
++                Sign up
++              </Link>
++            </Show>
++            <Show when="signed-in">
++              <Link
++                href="/dashboard"
++                className="rounded-full bg-foreground px-4 py-2 text-background"
++              >
++                Dashboard
++              </Link>
++            </Show>
++          </nav>
++        </div>
+         <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
+           <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
+             To get started, edit the{" "}
+diff --git a/src/app/sign-in/[[...sign-in]]/page.tsx b/src/app/sign-in/[[...sign-in]]/page.tsx
+new file mode 100644
+index 0000000..0cfd181
+--- /dev/null
++++ b/src/app/sign-in/[[...sign-in]]/page.tsx
+@@ -0,0 +1,9 @@
++import { SignIn } from "@clerk/nextjs";
++
++export default function SignInPage() {
++  return (
++    <main className="flex flex-1 items-center justify-center p-8">
++      <SignIn />
++    </main>
++  );
++}
+diff --git a/src/app/sign-up/[[...sign-up]]/page.tsx b/src/app/sign-up/[[...sign-up]]/page.tsx
+new file mode 100644
+index 0000000..009cebe
+--- /dev/null
++++ b/src/app/sign-up/[[...sign-up]]/page.tsx
+@@ -0,0 +1,9 @@
++import { SignUp } from "@clerk/nextjs";
++
++export default function SignUpPage() {
++  return (
++    <main className="flex flex-1 items-center justify-center p-8">
++      <SignUp />
++    </main>
++  );
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..809048e 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,5 @@
++import { currentUser } from "@clerk/nextjs/server";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -18,7 +20,36 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// Clerk owns credentials and sessions; this is where a signed-in Clerk
++// identity gets mapped onto (and, on first sign-in, added to) our own user
++// records. `id` is the Clerk user id, so it's stable across sign-ins.
++function syncFromClerk(clerkUser: NonNullable<Awaited<ReturnType<typeof currentUser>>>): User {
++  const existing = users.find((u) => u.id === clerkUser.id);
++  if (existing) return existing;
++
++  const email = clerkUser.primaryEmailAddress?.emailAddress ?? "";
++  const name =
++    [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") ||
++    clerkUser.username ||
++    email.split("@")[0] ||
++    "New user";
++
++  const created: User = {
++    id: clerkUser.id,
++    email,
++    name,
++    createdAt: new Date(clerkUser.createdAt).toISOString().slice(0, 10),
++  };
++  users.push(created);
++  return created;
++}
++
++// Returns the signed-in user, or undefined if nobody is signed in. Backed by
++// Clerk's session (see src/proxy.ts, which is what actually keeps signed-out
++// visitors off /dashboard) rather than the old "just pick the first user"
++// placeholder.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const clerkUser = await currentUser();
++  if (!clerkUser) return undefined;
++  return syncFromClerk(clerkUser);
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..2f5123e
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,18 @@
++import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
++
++// Next.js 16 renamed the "middleware" file convention to "proxy"; this file
++// is that convention's entry point (same clerkMiddleware() API either way).
++const isProtectedRoute = createRouteMatcher(["/dashboard(.*)"]);
++
++export default clerkMiddleware(async (auth, req) => {
++  if (isProtectedRoute(req)) {
++    await auth.protect();
++  }
++});
++
++export const config = {
++  matcher: [
++    "/((?!_next|[^?]*\\.(?:html?|css|js|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
++    "/(api|trpc)(.*)",
++  ],
++};

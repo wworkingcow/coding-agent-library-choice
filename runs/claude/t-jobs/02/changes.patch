@@ -1,0 +1,232 @@
+diff --git a/.env.development b/.env.development
+new file mode 100644
+index 0000000..cd7ec63
+--- /dev/null
++++ b/.env.development
+@@ -0,0 +1,4 @@
++# Loaded automatically by `next dev`. Not a secret — just tells the Inngest
++# SDK to run against the local Inngest Dev Server instead of Inngest Cloud.
++# See "Background jobs" in the README.
++INNGEST_DEV=1
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..48c460d
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# Inngest (background jobs — see src/lib/inngest/)
++# Not required for local dev: `npx inngest-cli dev` auto-discovers the app
++# at http://localhost:3000/api/inngest without any keys.
++# Set these when deploying so the app can talk to Inngest Cloud.
++# Get real values from https://app.inngest.com after creating a Notely app there.
++INNGEST_EVENT_KEY=placeholder_event_key
++INNGEST_SIGNING_KEY=placeholder_signing_key
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..9769b99 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,8 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
++!.env.development
+ 
+ # vercel
+ .vercel
+diff --git a/README.md b/README.md
+index 48b9049..6b366a0 100644
+--- a/README.md
++++ b/README.md
+@@ -7,9 +7,39 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ - Users live in `src/lib/users.ts` as an in-memory list.
+ - `/dashboard` shows the current user and the team.
+ - There is no sign-in, no billing, and no email yet.
++- Creating a user (`createUser` in `src/lib/users.ts`) schedules a background
++  job — see "Background jobs" below.
+ 
+ ## Develop
+ 
+ ```bash
+ npm run dev
+ ```
++
++## Background jobs
++
++Background jobs run on [Inngest](https://www.inngest.com/): durable
++functions with built-in delayed execution and retries, no queue/infra to
++run yourself. The setup:
++
++- `src/lib/inngest/client.ts` — the Inngest client and event types.
++- `src/lib/inngest/functions.ts` — `sendUserReminder`, triggered by the
++  `user/created` event. It sleeps 10 minutes, then logs a reminder. Failed
++  steps retry automatically (4 retries, with backoff).
++- `src/app/api/inngest/route.ts` — the route Inngest calls to run functions.
++- `createUser` in `src/lib/users.ts` sends the `user/created` event.
++
++To run jobs locally, alongside `npm run dev`, start the Inngest dev server
++in a second terminal:
++
++```bash
++npm run dev:jobs
++```
++
++Open http://localhost:8288 to see the dev dashboard, inspect runs, and watch
++the 10-minute sleep + reminder log for any user you create. No credentials
++are needed locally — the dev server talks to `/api/inngest` directly.
++
++For deployed environments, copy `.env.example` to `.env.local` and fill in
++real `INNGEST_EVENT_KEY` / `INNGEST_SIGNING_KEY` values from
++https://app.inngest.com.
+diff --git a/package.json b/package.json
+index 0e1b8e4..743d9dd 100644
+--- a/package.json
++++ b/package.json
+@@ -4,11 +4,13 @@
+   "private": true,
+   "scripts": {
+     "dev": "next dev",
++    "dev:jobs": "inngest-cli dev",
+     "build": "next build",
+     "start": "next start",
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "inngest": "^4.19.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/inngest/route.ts b/src/app/api/inngest/route.ts
+new file mode 100644
+index 0000000..d9a33a0
+--- /dev/null
++++ b/src/app/api/inngest/route.ts
+@@ -0,0 +1,12 @@
++import { serve } from "inngest/next";
++import { inngest } from "@/lib/inngest/client";
++import { sendUserReminder } from "@/lib/inngest/functions";
++
++// Registers Notely's background jobs with Inngest. In dev, point the
++// Inngest Dev Server at this route (see README) and it will discover
++// `sendUserReminder` automatically; in production Inngest Cloud calls back
++// into this route to invoke each step.
++export const { GET, POST, PUT } = serve({
++  client: inngest,
++  functions: [sendUserReminder],
++});
+diff --git a/src/lib/inngest/client.ts b/src/lib/inngest/client.ts
+new file mode 100644
+index 0000000..be31fe7
+--- /dev/null
++++ b/src/lib/inngest/client.ts
+@@ -0,0 +1,22 @@
++import { Inngest, eventType, staticSchema } from "inngest";
++
++// Background job runner for Notely.
++//
++// Inngest was picked because it needs no infra of its own (no Redis/queue to
++// stand up) — it's a hosted event + durable-function service with a single
++// Next.js route handler (see src/app/api/inngest/route.ts). Locally it runs
++// against the free `inngest-cli dev` dev server; in production it talks to
++// the Inngest Cloud API using the keys below.
++export const inngest = new Inngest({ id: "notely" });
++
++// The typed contract between "something happened" (a user was created) and
++// the functions that react to it (src/lib/inngest/functions.ts). staticSchema
++// gives us compile-time typing for the event data without pulling in a
++// runtime validation library.
++export const userCreatedEvent = eventType("user/created", {
++  schema: staticSchema<{
++    userId: string;
++    email: string;
++    name: string;
++  }>(),
++});
+diff --git a/src/lib/inngest/functions.ts b/src/lib/inngest/functions.ts
+new file mode 100644
+index 0000000..19ada7d
+--- /dev/null
++++ b/src/lib/inngest/functions.ts
+@@ -0,0 +1,29 @@
++import { inngest, userCreatedEvent } from "@/lib/inngest/client";
++
++// Fires whenever a "user/created" event is sent (see createUser in
++// src/lib/users.ts). Waits 10 minutes, then logs a reminder for that user.
++//
++// step.sleep durably suspends the function — Inngest persists the wakeup
++// time and resumes the function itself, so this survives deploys/restarts
++// without needing a timer to keep running in process.
++//
++// retries: 4 means the reminder step gets up to 4 retry attempts (5 tries
++// total) with backoff if it throws, before the run is marked failed.
++export const sendUserReminder = inngest.createFunction(
++  {
++    id: "send-user-reminder",
++    retries: 4,
++    triggers: [{ event: userCreatedEvent }],
++  },
++  async ({ event, step }) => {
++    const { userId, email, name } = event.data;
++
++    await step.sleep("wait-10-minutes", "10m");
++
++    await step.run("log-reminder", async () => {
++      console.log(
++        `[reminder] Hi ${name} (${email}, id=${userId}) — this is your 10-minute welcome reminder.`
++      );
++    });
++  }
++);
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..b005b64 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,5 @@
++import { inngest, userCreatedEvent } from "@/lib/inngest/client";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -10,6 +12,8 @@ const users: User[] = [
+   { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+ ];
+ 
++let nextId = users.length + 1;
++
+ export async function listUsers(): Promise<User[]> {
+   return users;
+ }
+@@ -18,6 +22,33 @@ export async function getUser(id: string): Promise<User | undefined> {
+   return users.find((u) => u.id === id);
+ }
+ 
++export async function createUser(input: {
++  email: string;
++  name: string;
++}): Promise<User> {
++  const user: User = {
++    id: String(nextId++),
++    email: input.email,
++    name: input.name,
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  users.push(user);
++
++  // Schedule the 10-minute welcome reminder as a background job (see
++  // src/lib/inngest/functions.ts). Sending the event just enqueues it —
++  // Inngest owns the delay and retries from here, so this doesn't block
++  // or fail user creation if the job itself has trouble later.
++  await inngest.send(
++    userCreatedEvent.create({
++      userId: user.id,
++      email: user.email,
++      name: user.name,
++    })
++  );
++
++  return user;
++}
++
+ // TODO: there is no real session handling yet — the dashboard just picks the first user.
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];

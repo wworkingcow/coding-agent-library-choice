@@ -1,0 +1,786 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..e482c9e
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,17 @@
++# Copy to .env.local and fill in. All values below are placeholders.
++
++# Signs and encrypts the session JWT. Generate one with: npx auth secret
++AUTH_SECRET="replace-me-with-a-32-byte-random-string"
++
++# Google OAuth — https://console.cloud.google.com/apis/credentials
++# Authorized redirect URI: http://localhost:3000/api/auth/callback/google
++AUTH_GOOGLE_ID="000000000000-replaceme.apps.googleusercontent.com"
++AUTH_GOOGLE_SECRET="GOCSPX-replace-me"
++
++# Public origin of the app. `next dev` infers this, but a production build
++# rejects requests with an UntrustedHost error unless it is set (Vercel is the
++# one exception — it injects the value itself). Set it to your real origin.
++AUTH_URL="http://localhost:3000"
++
++# The seeded users in src/lib/users.ts (ada@example.com, grace@example.com)
++# both use the password: password123
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/package.json b/package.json
+index 0e1b8e4..863c6a4 100644
+--- a/package.json
++++ b/package.json
+@@ -9,9 +9,12 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "bcryptjs": "^3.0.3",
+     "next": "16.3.4",
++    "next-auth": "^5.0.0-beta.32",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "zod": "^4.5.4"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/app/api/auth/[...nextauth]/route.ts b/src/app/api/auth/[...nextauth]/route.ts
+new file mode 100644
+index 0000000..86c9f3d
+--- /dev/null
++++ b/src/app/api/auth/[...nextauth]/route.ts
+@@ -0,0 +1,3 @@
++import { handlers } from "@/auth";
++
++export const { GET, POST } = handlers;
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..43952fc 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,15 +1,36 @@
++import { redirect } from "next/navigation";
++
++import { signOutAction } from "@/lib/auth-actions";
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
++  // The real gate. src/proxy.ts only redirects optimistically; it runs before
++  // rendering and must not be the only thing standing between a visitor and
++  // this page.
+   const me = await getCurrentUser();
++  if (!me) redirect("/signin?callbackUrl=%2Fdashboard");
++
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
+-      <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+-      </p>
++      <div className="flex items-start justify-between gap-4">
++        <div>
++          <h1 className="text-2xl font-semibold">Dashboard</h1>
++          <p className="mt-2 text-sm opacity-70">
++            Signed in as {me.name} ({me.email})
++          </p>
++        </div>
++
++        <form action={signOutAction}>
++          <button
++            type="submit"
++            className="h-9 rounded-full border border-solid border-black/[.12] px-4 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.18] dark:hover:bg-white/[.06]"
++          >
++            Sign out
++          </button>
++        </form>
++      </div>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+diff --git a/src/app/signin/page.tsx b/src/app/signin/page.tsx
+new file mode 100644
+index 0000000..3186db4
+--- /dev/null
++++ b/src/app/signin/page.tsx
+@@ -0,0 +1,15 @@
++import type { Metadata } from "next";
++
++import { AuthForm } from "@/components/auth-form";
++import { signInAction } from "@/lib/auth-actions";
++
++export const metadata: Metadata = { title: "Sign in · Notely" };
++
++export default async function SignInPage({
++  searchParams,
++}: PageProps<"/signin">) {
++  const { callbackUrl } = await searchParams;
++  const target = typeof callbackUrl === "string" ? callbackUrl : "/dashboard";
++
++  return <AuthForm mode="signin" action={signInAction} callbackUrl={target} />;
++}
+diff --git a/src/app/signup/page.tsx b/src/app/signup/page.tsx
+new file mode 100644
+index 0000000..c43eeb1
+--- /dev/null
++++ b/src/app/signup/page.tsx
+@@ -0,0 +1,15 @@
++import type { Metadata } from "next";
++
++import { AuthForm } from "@/components/auth-form";
++import { signUpAction } from "@/lib/auth-actions";
++
++export const metadata: Metadata = { title: "Sign up · Notely" };
++
++export default async function SignUpPage({
++  searchParams,
++}: PageProps<"/signup">) {
++  const { callbackUrl } = await searchParams;
++  const target = typeof callbackUrl === "string" ? callbackUrl : "/dashboard";
++
++  return <AuthForm mode="signup" action={signUpAction} callbackUrl={target} />;
++}
+diff --git a/src/auth.config.ts b/src/auth.config.ts
+new file mode 100644
+index 0000000..b093474
+--- /dev/null
++++ b/src/auth.config.ts
+@@ -0,0 +1,27 @@
++import type { NextAuthConfig } from "next-auth";
++import Google from "next-auth/providers/google";
++
++/**
++ * The half of the Auth.js config that is safe to run in the proxy (Edge)
++ * runtime: no bcrypt, no user store, no Node built-ins.
++ *
++ * `src/auth.ts` spreads this and adds the Credentials provider and the `jwt`
++ * callback, both of which need the user store and therefore Node.
++ */
++export const authConfig = {
++  providers: [Google],
++  session: { strategy: "jwt" },
++  pages: {
++    signIn: "/signin",
++  },
++  callbacks: {
++    // Copy our internal user id off the token and onto the session, so
++    // `getCurrentUser()` can resolve the real record from the store.
++    session({ session, token }) {
++      if (token.sub) session.user.id = token.sub;
++      if (typeof token.name === "string") session.user.name = token.name;
++      if (typeof token.picture === "string") session.user.image = token.picture;
++      return session;
++    },
++  },
++} satisfies NextAuthConfig;
+diff --git a/src/auth.ts b/src/auth.ts
+new file mode 100644
+index 0000000..225b8ed
+--- /dev/null
++++ b/src/auth.ts
+@@ -0,0 +1,76 @@
++import NextAuth from "next-auth";
++import Credentials from "next-auth/providers/credentials";
++import { z } from "zod";
++
++import { authConfig } from "@/auth.config";
++import { upsertOAuthUser, verifyCredentials } from "@/lib/users";
++
++const credentialsSchema = z.object({
++  email: z.string().email(),
++  password: z.string().min(1),
++});
++
++export const { handlers, auth, signIn, signOut } = NextAuth({
++  ...authConfig,
++  providers: [
++    ...authConfig.providers,
++    Credentials({
++      credentials: {
++        email: { label: "Email", type: "email" },
++        password: { label: "Password", type: "password" },
++      },
++      // Returning null (rather than throwing) makes Auth.js surface a generic
++      // CredentialsSignin error, so we never leak whether the email exists.
++      async authorize(credentials) {
++        const parsed = credentialsSchema.safeParse(credentials);
++        if (!parsed.success) return null;
++
++        const user = await verifyCredentials(
++          parsed.data.email,
++          parsed.data.password,
++        );
++        if (!user) return null;
++
++        return {
++          id: user.id,
++          email: user.email,
++          name: user.name,
++          image: user.image,
++        };
++      },
++    }),
++  ],
++  callbacks: {
++    ...authConfig.callbacks,
++
++    signIn({ account, profile }) {
++      // Only trust a Google identity once Google says the address is verified;
++      // otherwise it could be used to take over a matching local account.
++      if (account?.provider === "google") return profile?.email_verified === true;
++      return true;
++    },
++
++    /**
++     * Runs with `account`/`user` set only on the initial sign in — every later
++     * call just re-reads the token, which is what keeps the proxy's Edge
++     * runtime away from the user store.
++     */
++    async jwt({ token, user, account }) {
++      if (account?.provider === "google" && token.email) {
++        const linked = await upsertOAuthUser({
++          email: token.email,
++          name: token.name,
++          image: token.picture,
++          provider: "google",
++        });
++        // Replace Google's subject with our own id so the rest of the app has
++        // a single notion of "who is this".
++        token.sub = linked.id;
++        token.name = linked.name;
++      } else if (user?.id) {
++        token.sub = user.id;
++      }
++      return token;
++    },
++  },
++});
+diff --git a/src/components/auth-form.tsx b/src/components/auth-form.tsx
+new file mode 100644
+index 0000000..af986f6
+--- /dev/null
++++ b/src/components/auth-form.tsx
+@@ -0,0 +1,184 @@
++"use client";
++
++import Link from "next/link";
++import { useActionState } from "react";
++import { useFormStatus } from "react-dom";
++
++import type { AuthFormState } from "@/lib/auth-actions";
++import { googleSignInAction } from "@/lib/auth-actions";
++
++type Props = {
++  mode: "signin" | "signup";
++  action: (state: AuthFormState, formData: FormData) => Promise<AuthFormState>;
++  callbackUrl: string;
++};
++
++const COPY = {
++  signin: {
++    title: "Sign in to Notely",
++    submit: "Sign in",
++    altPrompt: "New here?",
++    altHref: "/signup",
++    altLabel: "Create an account",
++  },
++  signup: {
++    title: "Create your Notely account",
++    submit: "Create account",
++    altPrompt: "Already have an account?",
++    altHref: "/signin",
++    altLabel: "Sign in",
++  },
++} as const;
++
++export function AuthForm({ mode, action, callbackUrl }: Props) {
++  const [state, formAction] = useActionState(action, {});
++  const copy = COPY[mode];
++  const fieldErrors = state.fieldErrors ?? {};
++
++  return (
++    <main className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center p-8">
++      <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
++
++      <form action={googleSignInAction} className="mt-8">
++        <input type="hidden" name="callbackUrl" value={callbackUrl} />
++        <GoogleButton />
++      </form>
++
++      <div className="my-6 flex items-center gap-3 text-xs uppercase tracking-wide opacity-50">
++        <span className="h-px flex-1 bg-current" />
++        or
++        <span className="h-px flex-1 bg-current" />
++      </div>
++
++      <form action={formAction} className="flex flex-col gap-4" noValidate>
++        <input type="hidden" name="callbackUrl" value={callbackUrl} />
++
++        {mode === "signup" && (
++          <Field
++            label="Name"
++            name="name"
++            type="text"
++            autoComplete="name"
++            errors={fieldErrors.name}
++          />
++        )}
++
++        <Field
++          label="Email"
++          name="email"
++          type="email"
++          autoComplete="email"
++          errors={fieldErrors.email}
++        />
++
++        <Field
++          label="Password"
++          name="password"
++          type="password"
++          autoComplete={mode === "signup" ? "new-password" : "current-password"}
++          errors={fieldErrors.password}
++        />
++
++        {state.error && (
++          <p role="alert" className="text-sm text-red-600 dark:text-red-400">
++            {state.error}
++          </p>
++        )}
++
++        <SubmitButton label={copy.submit} />
++      </form>
++
++      <p className="mt-6 text-sm opacity-70">
++        {copy.altPrompt}{" "}
++        <Link href={copy.altHref} className="font-medium underline">
++          {copy.altLabel}
++        </Link>
++      </p>
++    </main>
++  );
++}
++
++function Field({
++  label,
++  name,
++  type,
++  autoComplete,
++  errors,
++}: {
++  label: string;
++  name: string;
++  type: string;
++  autoComplete: string;
++  errors?: string[];
++}) {
++  const errorId = `${name}-error`;
++  return (
++    <label className="flex flex-col gap-1.5 text-sm">
++      <span className="font-medium">{label}</span>
++      <input
++        name={name}
++        type={type}
++        autoComplete={autoComplete}
++        required
++        aria-invalid={errors ? true : undefined}
++        aria-describedby={errors ? errorId : undefined}
++        className="rounded-md border border-black/[.12] bg-transparent px-3 py-2 outline-none focus:border-current dark:border-white/[.18]"
++      />
++      {errors?.map((message) => (
++        <span key={message} id={errorId} className="text-red-600 dark:text-red-400">
++          {message}
++        </span>
++      ))}
++    </label>
++  );
++}
++
++function SubmitButton({ label }: { label: string }) {
++  const { pending } = useFormStatus();
++  return (
++    <button
++      type="submit"
++      disabled={pending}
++      className="mt-2 h-11 rounded-full bg-foreground text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
++    >
++      {pending ? "Please wait…" : label}
++    </button>
++  );
++}
++
++function GoogleButton() {
++  const { pending } = useFormStatus();
++  return (
++    <button
++      type="submit"
++      disabled={pending}
++      className="flex h-11 w-full items-center justify-center gap-2.5 rounded-full border border-solid border-black/[.12] text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-50 dark:border-white/[.18] dark:hover:bg-white/[.06]"
++    >
++      <GoogleMark />
++      Continue with Google
++    </button>
++  );
++}
++
++function GoogleMark() {
++  return (
++    <svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">
++      <path
++        fill="#4285F4"
++        d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62Z"
++      />
++      <path
++        fill="#34A853"
++        d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18Z"
++      />
++      <path
++        fill="#FBBC05"
++        d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33Z"
++      />
++      <path
++        fill="#EA4335"
++        d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.59C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58Z"
++      />
++    </svg>
++  );
++}
+diff --git a/src/lib/auth-actions.ts b/src/lib/auth-actions.ts
+new file mode 100644
+index 0000000..33bb49d
+--- /dev/null
++++ b/src/lib/auth-actions.ts
+@@ -0,0 +1,107 @@
++"use server";
++
++import { AuthError } from "next-auth";
++import { z } from "zod";
++
++import { signIn, signOut } from "@/auth";
++import { createUser } from "@/lib/users";
++
++export type AuthFormState = {
++  error?: string;
++  fieldErrors?: Record<string, string[]>;
++};
++
++const signUpSchema = z.object({
++  name: z.string().trim().min(1, "Please enter your name"),
++  email: z.email("Enter a valid email address"),
++  password: z.string().min(8, "Use at least 8 characters"),
++});
++
++const signInSchema = z.object({
++  email: z.email("Enter a valid email address"),
++  password: z.string().min(1, "Enter your password"),
++});
++
++/**
++ * Only ever redirect within this app. `callbackUrl` arrives from the query
++ * string, so an absolute or protocol-relative value would be an open redirect.
++ */
++function safeRedirect(value: FormDataEntryValue | null): string {
++  const url = typeof value === "string" ? value : "";
++  if (!url.startsWith("/") || url.startsWith("//")) return "/dashboard";
++  return url;
++}
++
++export async function signUpAction(
++  _prev: AuthFormState,
++  formData: FormData,
++): Promise<AuthFormState> {
++  const parsed = signUpSchema.safeParse({
++    name: formData.get("name"),
++    email: formData.get("email"),
++    password: formData.get("password"),
++  });
++
++  if (!parsed.success) {
++    return { fieldErrors: z.flattenError(parsed.error).fieldErrors };
++  }
++
++  const user = await createUser(parsed.data);
++  if (!user) {
++    return { fieldErrors: { email: ["That email is already registered"] } };
++  }
++
++  return credentialsSignIn(
++    parsed.data.email,
++    parsed.data.password,
++    safeRedirect(formData.get("callbackUrl")),
++  );
++}
++
++export async function signInAction(
++  _prev: AuthFormState,
++  formData: FormData,
++): Promise<AuthFormState> {
++  const parsed = signInSchema.safeParse({
++    email: formData.get("email"),
++    password: formData.get("password"),
++  });
++
++  if (!parsed.success) {
++    return { fieldErrors: z.flattenError(parsed.error).fieldErrors };
++  }
++
++  return credentialsSignIn(
++    parsed.data.email,
++    parsed.data.password,
++    safeRedirect(formData.get("callbackUrl")),
++  );
++}
++
++export async function googleSignInAction(formData: FormData) {
++  await signIn("google", { redirectTo: safeRedirect(formData.get("callbackUrl")) });
++}
++
++export async function signOutAction() {
++  await signOut({ redirectTo: "/" });
++}
++
++async function credentialsSignIn(
++  email: string,
++  password: string,
++  redirectTo: string,
++): Promise<AuthFormState> {
++  try {
++    await signIn("credentials", { email, password, redirectTo });
++    return {};
++  } catch (error) {
++    // A successful sign in throws NEXT_REDIRECT, which must reach Next.js.
++    // Only genuine auth failures are ours to report.
++    if (error instanceof AuthError) {
++      return error.type === "CredentialsSignin"
++        ? { error: "Wrong email or password" }
++        : { error: "Something went wrong signing you in" };
++    }
++    throw error;
++  }
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..dca7ff2 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,24 +1,163 @@
++import bcrypt from "bcryptjs";
++
+ export type User = {
+   id: string;
+   email: string;
+   name: string;
+   createdAt: string;
++  image?: string;
++};
++
++// Everything the store knows about a user. `passwordHash` and `providers` never
++// leave this module — callers only ever see the public `User` shape above.
++type UserRecord = User & {
++  passwordHash: string | null;
++  providers: string[];
+ };
+ 
+-const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++const BCRYPT_ROUNDS = 12;
++
++// A valid bcrypt hash of a random throwaway string, so nothing a caller can
++// send will match it. Used to keep the timing of a failed lookup close to the
++// timing of a wrong password.
++const DUMMY_HASH = "$2b$12$D73JJnD0WXpgp61FkWoHZuxGEb0Vhcps8HAltpjXjTADDAWT9IRPC";
++
++// Seeded users share the dev password "password123" (see .env.example).
++const users: UserRecord[] = [
++  {
++    id: "1",
++    email: "ada@example.com",
++    name: "Ada",
++    createdAt: "2026-01-04",
++    passwordHash: "$2b$12$Bh0ByTjHL8AvDvzHrBaKU.PFZ1Eb6jsJ52xJT1DsvKW.i2nLTiwBG",
++    providers: ["credentials"],
++  },
++  {
++    id: "2",
++    email: "grace@example.com",
++    name: "Grace",
++    createdAt: "2026-02-11",
++    passwordHash: "$2b$12$5YkEYqcu56VDrhoBV.RaYOCdLGvQK6TZPgTVQ5YUX46jtmfCAOlum",
++    providers: ["credentials"],
++  },
+ ];
+ 
++let nextId = users.length + 1;
++
++const normalizeEmail = (email: string) => email.trim().toLowerCase();
++
++// Builds the public shape field by field rather than stripping secrets off the
++// record, so a field added to UserRecord later cannot leak by omission.
++function toUser(record: UserRecord): User {
++  const { id, email, name, createdAt, image } = record;
++  return { id, email, name, createdAt, image };
++}
++
++function today(): string {
++  return new Date().toISOString().slice(0, 10);
++}
++
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  return users.map(toUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  const found = users.find((u) => u.id === id);
++  return found && toUser(found);
++}
++
++export async function getUserByEmail(email: string): Promise<User | undefined> {
++  const target = normalizeEmail(email);
++  const found = users.find((u) => u.email === target);
++  return found && toUser(found);
++}
++
++/**
++ * Create an email + password user. Returns `null` when the email is taken so
++ * the caller can render a field error instead of handling a throw.
++ */
++export async function createUser(input: {
++  email: string;
++  name: string;
++  password: string;
++}): Promise<User | null> {
++  const email = normalizeEmail(input.email);
++  if (users.some((u) => u.email === email)) return null;
++
++  const record: UserRecord = {
++    id: String(nextId++),
++    email,
++    name: input.name.trim(),
++    createdAt: today(),
++    passwordHash: await bcrypt.hash(input.password, BCRYPT_ROUNDS),
++    providers: ["credentials"],
++  };
++  users.push(record);
++  return toUser(record);
++}
++
++/**
++ * Check an email + password pair. Always runs a bcrypt comparison — even for
++ * unknown emails and for accounts that only have a Google login — so the
++ * response time does not reveal which emails exist.
++ */
++export async function verifyCredentials(
++  email: string,
++  password: string,
++): Promise<User | null> {
++  const target = normalizeEmail(email);
++  const found = users.find((u) => u.email === target);
++  const hash = found?.passwordHash ?? DUMMY_HASH;
++
++  const ok = await bcrypt.compare(password, hash);
++  if (!ok || !found || !found.passwordHash) return null;
++  return toUser(found);
++}
++
++/**
++ * Look up (or create) the local user behind an OAuth login, and remember which
++ * provider it arrived from. An existing email + password account is linked
++ * rather than duplicated — Google has already verified the address.
++ */
++export async function upsertOAuthUser(input: {
++  email: string;
++  name?: string | null;
++  image?: string | null;
++  provider: string;
++}): Promise<User> {
++  const email = normalizeEmail(input.email);
++  const existing = users.find((u) => u.email === email);
++
++  if (existing) {
++    if (!existing.providers.includes(input.provider)) {
++      existing.providers.push(input.provider);
++    }
++    if (input.image && !existing.image) existing.image = input.image;
++    return toUser(existing);
++  }
++
++  const record: UserRecord = {
++    id: String(nextId++),
++    email,
++    name: input.name?.trim() || email.split("@")[0],
++    createdAt: today(),
++    image: input.image ?? undefined,
++    passwordHash: null,
++    providers: [input.provider],
++  };
++  users.push(record);
++  return toUser(record);
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++/**
++ * The signed-in user, or `undefined` when the request has no valid session.
++ *
++ * `@/auth` is imported lazily: it imports this module for credential checks, so
++ * a top-level import would make the two files a cycle.
++ */
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const { auth } = await import("@/auth");
++  const session = await auth();
++  if (!session?.user?.id) return undefined;
++  return getUser(session.user.id);
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..861cdca
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,38 @@
++import NextAuth from "next-auth";
++import { authConfig } from "@/auth.config";
++
++const PROTECTED = ["/dashboard"];
++const AUTH_PAGES = ["/signin", "/signup"];
++
++/**
++ * Optimistic routing only: it reads the session cookie to keep signed-out users
++ * from ever seeing the dashboard shell, and to bounce signed-in users off the
++ * auth pages.
++ *
++ * This is NOT the authorization gate. The proxy runs before rendering and can
++ * be bypassed, so every protected page re-checks the session server-side (see
++ * `getCurrentUser()` in src/lib/users.ts).
++ */
++const { auth } = NextAuth(authConfig);
++
++export default auth((req) => {
++  const { nextUrl } = req;
++  const isLoggedIn = Boolean(req.auth?.user);
++  const { pathname } = nextUrl;
++
++  if (!isLoggedIn && PROTECTED.some((p) => pathname.startsWith(p))) {
++    const signInUrl = new URL("/signin", nextUrl);
++    // Remember where they were headed so sign-in can send them back.
++    signInUrl.searchParams.set("callbackUrl", pathname + nextUrl.search);
++    return Response.redirect(signInUrl);
++  }
++
++  if (isLoggedIn && AUTH_PAGES.includes(pathname)) {
++    return Response.redirect(new URL("/dashboard", nextUrl));
++  }
++});
++
++export const config = {
++  // Skip Next internals, the Auth.js routes themselves, and static files.
++  matcher: ["/((?!api/auth|_next/static|_next/image|favicon.ico|.*\\.svg$).*)"],
++};

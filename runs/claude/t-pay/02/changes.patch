@@ -1,0 +1,376 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..28db706
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,9 @@
++# Stripe — used for the Pro monthly subscription checkout + webhook.
++# Get real values from https://dashboard.stripe.com/test/apikeys (keys)
++# and https://dashboard.stripe.com/test/products (price) once you're ready
++# to test against Stripe for real. `stripe listen --forward-to
++# localhost:3000/api/webhooks/stripe` will print a webhook signing secret
++# for local development.
++STRIPE_SECRET_KEY=sk_test_placeholder
++STRIPE_WEBHOOK_SECRET=whsec_placeholder
++STRIPE_PRICE_ID_PRO=price_placeholder
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/package.json b/package.json
+index 0e1b8e4..9ab9903 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+   "dependencies": {
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "stripe": "^22.6.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
+diff --git a/src/app/api/checkout/route.ts b/src/app/api/checkout/route.ts
+new file mode 100644
+index 0000000..a85a75b
+--- /dev/null
++++ b/src/app/api/checkout/route.ts
+@@ -0,0 +1,66 @@
++import { NextRequest, NextResponse } from "next/server";
++import { getStripe } from "@/lib/stripe";
++import { PRO_PRICE_ID } from "@/lib/plans";
++import { getCurrentUser, setUserStripeCustomerId } from "@/lib/users";
++
++// Starts a Stripe Checkout session for the Pro monthly subscription.
++// Triggered by the "Upgrade to Pro" form on /dashboard.
++export async function POST(req: NextRequest) {
++  const user = await getCurrentUser();
++  if (!user) {
++    return NextResponse.redirect(new URL("/dashboard", req.url), { status: 303 });
++  }
++
++  if (user.plan === "pro") {
++    return NextResponse.redirect(new URL("/dashboard", req.url), { status: 303 });
++  }
++
++  if (!PRO_PRICE_ID) {
++    console.error("STRIPE_PRICE_ID_PRO is not set — cannot start checkout.");
++    return NextResponse.redirect(
++      new URL("/dashboard?checkout=error", req.url),
++      { status: 303 }
++    );
++  }
++
++  try {
++    const stripe = getStripe();
++    const origin = req.nextUrl.origin;
++
++    // Reuse the Stripe customer across checkout attempts instead of
++    // minting a new one every time the user clicks "Upgrade".
++    let customerId = user.stripeCustomerId;
++    if (!customerId) {
++      const customer = await stripe.customers.create({
++        email: user.email,
++        name: user.name,
++        metadata: { userId: user.id },
++      });
++      customerId = customer.id;
++      await setUserStripeCustomerId(user.id, customerId);
++    }
++
++    const session = await stripe.checkout.sessions.create({
++      mode: "subscription",
++      customer: customerId,
++      client_reference_id: user.id,
++      line_items: [{ price: PRO_PRICE_ID, quantity: 1 }],
++      success_url: `${origin}/dashboard?checkout=success`,
++      cancel_url: `${origin}/dashboard?checkout=canceled`,
++      metadata: { userId: user.id },
++      subscription_data: { metadata: { userId: user.id } },
++    });
++
++    if (!session.url) {
++      throw new Error("Stripe did not return a checkout URL");
++    }
++
++    return NextResponse.redirect(session.url, { status: 303 });
++  } catch (err) {
++    console.error("Failed to create Stripe checkout session", err);
++    return NextResponse.redirect(
++      new URL("/dashboard?checkout=error", req.url),
++      { status: 303 }
++    );
++  }
++}
+diff --git a/src/app/api/webhooks/stripe/route.ts b/src/app/api/webhooks/stripe/route.ts
+new file mode 100644
+index 0000000..62677a1
+--- /dev/null
++++ b/src/app/api/webhooks/stripe/route.ts
+@@ -0,0 +1,78 @@
++import { NextRequest, NextResponse } from "next/server";
++import type Stripe from "stripe";
++import { getStripe } from "@/lib/stripe";
++import {
++  getUserByStripeCustomerId,
++  setUserPlan,
++  setUserStripeCustomerId,
++} from "@/lib/users";
++
++function customerIdOf(customer: string | Stripe.Customer | Stripe.DeletedCustomer | null) {
++  if (!customer) return undefined;
++  return typeof customer === "string" ? customer : customer.id;
++}
++
++// Stripe calls this once payment succeeds (and on later subscription
++// lifecycle changes). Route Handlers don't parse the body for us, so
++// req.text() gives us the raw payload Stripe's signature check needs.
++export async function POST(req: NextRequest) {
++  const signature = req.headers.get("stripe-signature");
++  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
++
++  if (!signature || !webhookSecret) {
++    console.error("Stripe webhook is missing a signature or STRIPE_WEBHOOK_SECRET is unset.");
++    return NextResponse.json({ error: "Webhook not configured" }, { status: 400 });
++  }
++
++  const payload = await req.text();
++  const stripe = getStripe();
++
++  let event: Stripe.Event;
++  try {
++    event = stripe.webhooks.constructEvent(payload, signature, webhookSecret);
++  } catch (err) {
++    console.error("Stripe webhook signature verification failed", err);
++    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
++  }
++
++  switch (event.type) {
++    // Payment for the initial subscription succeeded — flip the user to Pro.
++    case "checkout.session.completed": {
++      const session = event.data.object as Stripe.Checkout.Session;
++      const userId = session.client_reference_id ?? session.metadata?.userId;
++      const customerId = customerIdOf(session.customer);
++
++      if (!userId) {
++        console.error("checkout.session.completed had no userId on it", session.id);
++        break;
++      }
++
++      if (customerId) {
++        await setUserStripeCustomerId(userId, customerId);
++      }
++      await setUserPlan(userId, "pro");
++      break;
++    }
++
++    // Subscription lapsed, was canceled, or payment failed on renewal —
++    // keep the user's plan in sync with their actual subscription status.
++    case "customer.subscription.updated":
++    case "customer.subscription.deleted": {
++      const subscription = event.data.object as Stripe.Subscription;
++      const customerId = customerIdOf(subscription.customer);
++      if (!customerId) break;
++
++      const user = await getUserByStripeCustomerId(customerId);
++      if (!user) break;
++
++      const isActive = subscription.status === "active" || subscription.status === "trialing";
++      await setUserPlan(user.id, isActive ? "pro" : "free");
++      break;
++    }
++
++    default:
++      break;
++  }
++
++  return NextResponse.json({ received: true });
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..4fc73e6 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,8 +1,15 @@
+ import { getCurrentUser, listUsers } from "@/lib/users";
++import { PRO_PLAN } from "@/lib/plans";
+ 
+-export default async function DashboardPage() {
++export default async function DashboardPage({
++  searchParams,
++}: {
++  searchParams: Promise<{ checkout?: string }>;
++}) {
++  const { checkout } = await searchParams;
+   const me = await getCurrentUser();
+   const all = await listUsers();
++  const isPro = me?.plan === "pro";
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+@@ -11,11 +18,47 @@ export default async function DashboardPage() {
+         Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
+       </p>
+ 
++      {checkout === "success" && (
++        <p className="mt-4 rounded-md bg-green-50 px-4 py-2 text-sm text-green-800 dark:bg-green-950 dark:text-green-300">
++          Payment received — your account will switch to Pro as soon as Stripe
++          confirms the subscription (usually within a few seconds).
++        </p>
++      )}
++      {checkout === "canceled" && (
++        <p className="mt-4 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
++          Checkout canceled — you&apos;re still on the Free plan.
++        </p>
++      )}
++      {checkout === "error" && (
++        <p className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-300">
++          Something went wrong starting checkout. Please try again.
++        </p>
++      )}
++
++      <section className="mt-8 rounded-lg border border-black/10 p-4 dark:border-white/10">
++        <h2 className="text-lg font-medium">Plan</h2>
++        <p className="mt-1 text-sm opacity-70">
++          You&apos;re currently on the{" "}
++          <span className="font-medium">{isPro ? "Pro" : "Free"}</span> plan.
++        </p>
++        {!isPro && (
++          <form action="/api/checkout" method="POST" className="mt-3">
++            <button
++              type="submit"
++              className="rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc]"
++            >
++              Upgrade to {PRO_PLAN.name} — {PRO_PLAN.priceLabel}
++            </button>
++          </form>
++        )}
++      </section>
++
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+         {all.map((u) => (
+           <li key={u.id} className="text-sm">
+-            {u.name} — {u.email} — joined {u.createdAt}
++            {u.name} — {u.email} — joined {u.createdAt} —{" "}
++            <span className="opacity-70">{u.plan === "pro" ? "Pro" : "Free"}</span>
+           </li>
+         ))}
+       </ul>
+diff --git a/src/lib/plans.ts b/src/lib/plans.ts
+new file mode 100644
+index 0000000..b2b1cb5
+--- /dev/null
++++ b/src/lib/plans.ts
+@@ -0,0 +1,8 @@
++// The Stripe Price ID for the recurring "Pro" subscription (created in the
++// Stripe dashboard/CLI). See .env.example for the placeholder value.
++export const PRO_PRICE_ID = process.env.STRIPE_PRICE_ID_PRO ?? "";
++
++export const PRO_PLAN = {
++  name: "Pro",
++  priceLabel: "$12/mo",
++} as const;
+diff --git a/src/lib/stripe.ts b/src/lib/stripe.ts
+new file mode 100644
+index 0000000..53bdb56
+--- /dev/null
++++ b/src/lib/stripe.ts
+@@ -0,0 +1,18 @@
++import Stripe from "stripe";
++
++let stripeClient: Stripe | null = null;
++
++// Lazily constructed so a missing key only breaks the routes that need
++// Stripe (checkout, webhook) instead of breaking the whole app at build time.
++export function getStripe(): Stripe {
++  if (!stripeClient) {
++    const secretKey = process.env.STRIPE_SECRET_KEY;
++    if (!secretKey) {
++      throw new Error(
++        "STRIPE_SECRET_KEY is not set. Copy .env.example to .env.local and fill in your Stripe test keys."
++      );
++    }
++    stripeClient = new Stripe(secretKey);
++  }
++  return stripeClient;
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..8b5b2a2 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,13 +1,17 @@
++export type Plan = "free" | "pro";
++
+ export type User = {
+   id: string;
+   email: string;
+   name: string;
+   createdAt: string;
++  plan: Plan;
++  stripeCustomerId?: string;
+ };
+ 
+ const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04", plan: "free" },
++  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11", plan: "free" },
+ ];
+ 
+ export async function listUsers(): Promise<User[]> {
+@@ -22,3 +26,24 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++export async function getUserByStripeCustomerId(
++  stripeCustomerId: string
++): Promise<User | undefined> {
++  return users.find((u) => u.stripeCustomerId === stripeCustomerId);
++}
++
++export async function setUserStripeCustomerId(
++  id: string,
++  stripeCustomerId: string
++): Promise<User | undefined> {
++  const user = users.find((u) => u.id === id);
++  if (user) user.stripeCustomerId = stripeCustomerId;
++  return user;
++}
++
++export async function setUserPlan(id: string, plan: Plan): Promise<User | undefined> {
++  const user = users.find((u) => u.id === id);
++  if (user) user.plan = plan;
++  return user;
++}

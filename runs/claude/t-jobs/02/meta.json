@@ -1,0 +1,6 @@
+{"date":"2026-09-03T23:51:25Z","agent":"claude","task":"t-jobs","run":"02",
+ "model":"sonnet",
+ "agent_version":"2.1.220 (Claude Code)",
+ "added_deps":"inngest","files_changed":"10","env_keys":"INNGEST_EVENT_KEY;INNGEST_SIGNING_KEY",
+ "outcome":"chose","tools":"Bash;Edit;Read;Write","web":"no",
+ "seconds":"464","cost_usd":"1.678575","turns":"64","is_error":"","exit":"0"}

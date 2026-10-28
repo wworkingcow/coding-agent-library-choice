@@ -1,0 +1,242 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..75dbb0e
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,24 @@
++# Feature flags (src/lib/flags.ts)
++#
++# Backed by Vercel Edge Config: a globally-replicated key/value store you can
++# edit from the Vercel dashboard or API in place — flags flip for users in
++# seconds, with no redeploy.
++#
++# 1. Create an Edge Config store: https://vercel.com/docs/edge-config/get-started
++# 2. Connect it to this project (or paste its connection string below).
++# 3. Add an item named "flags" to the store with content like:
++#      {
++#        "new-dashboard": {
++#          "enabled": false,
++#          "users": { "1": true, "grace@example.com": true }
++#        }
++#      }
++#
++# Left unset, every flag falls back to the FLAG_<KEY> vars below (handy for
++# local dev), then to its hardcoded default (off) in src/lib/flags.ts.
++EDGE_CONFIG="https://edge-config.vercel.com/ecfg_placeholder?token=placeholder-token"
++
++# Optional local-dev override, used only when Edge Config has no "enabled"
++# value for this flag (per-user overrides in Edge Config still win). Handy
++# for flipping a flag on your machine without provisioning Edge Config.
++# FLAG_NEW_DASHBOARD=true
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/package.json b/package.json
+index 0e1b8e4..ea4d01b 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@vercel/edge-config": "^1.5.1",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..97d5a8d 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,7 +1,22 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { getCurrentUser, isFeatureEnabledForCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
++  const newDashboardEnabled = await isFeatureEnabledForCurrentUser("new-dashboard");
++
++  if (!newDashboardEnabled) {
++    return (
++      <main className="mx-auto max-w-2xl p-8">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <p className="mt-2 text-sm opacity-70">
++          The new dashboard isn&apos;t enabled for{" "}
++          {me ? `${me.name} (${me.email})` : "your account"} yet. It&apos;s
++          gated behind the <code>new-dashboard</code> feature flag.
++        </p>
++      </main>
++    );
++  }
++
+   const all = await listUsers();
+ 
+   return (
+diff --git a/src/lib/flags.ts b/src/lib/flags.ts
+new file mode 100644
+index 0000000..1cdc7dd
+--- /dev/null
++++ b/src/lib/flags.ts
+@@ -0,0 +1,101 @@
++import { createClient } from "@vercel/edge-config";
++import type { User } from "./users";
++
++/**
++ * Feature flags, backed by Vercel Edge Config.
++ *
++ * Edge Config is a globally-replicated key/value store built for exactly
++ * this: reading small bits of config (like flags) on every request with very
++ * low latency, and updating them from the Vercel dashboard/API in place —
++ * no redeploy, and changes propagate within seconds.
++ *
++ * Add new flags by extending `FlagKey` and `DEFAULTS` below.
++ *
++ * Edge Config is expected to contain a single item named "flags", shaped like:
++ *
++ * {
++ *   "new-dashboard": {
++ *     "enabled": false,
++ *     "users": { "1": true, "grace@example.com": true }
++ *   }
++ * }
++ *
++ * - "enabled" is the flag's default for everyone.
++ * - "users" holds per-user overrides keyed by user id OR email, so a flag
++ *   can be flipped on/off for a specific person regardless of the default.
++ *
++ * If EDGE_CONFIG isn't set (e.g. local dev without a real Edge Config
++ * provisioned yet), flags fall back to an optional `FLAG_<KEY>` env var and
++ * then to their hardcoded default, so the app keeps working out of the box.
++ */
++
++export type FlagKey = "new-dashboard";
++
++type FlagConfig = {
++  enabled?: boolean;
++  users?: Record<string, boolean>;
++};
++
++type FlagsDocument = Partial<Record<FlagKey, FlagConfig>>;
++
++// Hardcoded fallback used when a flag has no Edge Config entry, no env
++// override, and no per-user override — i.e. the safe "off by default" state.
++const DEFAULTS: Record<FlagKey, boolean> = {
++  "new-dashboard": false,
++};
++
++const edgeConfig = process.env.EDGE_CONFIG
++  ? createClient(process.env.EDGE_CONFIG)
++  : null;
++
++const CACHE_TTL_MS = 5_000; // keep per-request reads snappy without going stale for long
++let cache: { doc: FlagsDocument; expiresAt: number } | null = null;
++
++async function loadFlagsDocument(): Promise<FlagsDocument> {
++  if (!edgeConfig) return {};
++
++  if (cache && cache.expiresAt > Date.now()) {
++    return cache.doc;
++  }
++
++  try {
++    const doc = (await edgeConfig.get<FlagsDocument>("flags")) ?? {};
++    cache = { doc, expiresAt: Date.now() + CACHE_TTL_MS };
++    return doc;
++  } catch (error) {
++    console.error("[flags] failed to read Edge Config, falling back to cached/default values", error);
++    return cache?.doc ?? {};
++  }
++}
++
++function envOverride(key: FlagKey): boolean | undefined {
++  const envKey = `FLAG_${key.toUpperCase().replace(/-/g, "_")}`;
++  const raw = process.env[envKey];
++  if (raw === undefined) return undefined;
++  return raw === "1" || raw.toLowerCase() === "true";
++}
++
++/**
++ * Evaluate a feature flag for a given user (or anonymously, if no user is
++ * signed in). Per-user overrides always win, so a flag can be turned on/off
++ * for a specific person without touching the global default.
++ */
++export async function isFeatureEnabled(
++  key: FlagKey,
++  user?: Pick<User, "id" | "email"> | null
++): Promise<boolean> {
++  const doc = await loadFlagsDocument();
++  const config = doc[key];
++
++  if (user && config?.users) {
++    if (user.id in config.users) return config.users[user.id];
++    if (user.email in config.users) return config.users[user.email];
++  }
++
++  if (config?.enabled !== undefined) return config.enabled;
++
++  const override = envOverride(key);
++  if (override !== undefined) return override;
++
++  return DEFAULTS[key];
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..d27a98e 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,5 @@
++import { isFeatureEnabled, type FlagKey } from "./flags";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -22,3 +24,20 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++/** Evaluate a feature flag for a specific user id. */
++export async function isFeatureEnabledForUser(
++  userId: string,
++  flag: FlagKey
++): Promise<boolean> {
++  const user = await getUser(userId);
++  return isFeatureEnabled(flag, user);
++}
++
++/** Evaluate a feature flag for whoever is currently signed in. */
++export async function isFeatureEnabledForCurrentUser(
++  flag: FlagKey
++): Promise<boolean> {
++  const user = await getCurrentUser();
++  return isFeatureEnabled(flag, user);
++}

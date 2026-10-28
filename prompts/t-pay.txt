@@ -1,0 +1,3 @@
+Add paid subscriptions to Notely: a monthly Pro plan, a checkout flow the user can start from /dashboard, and a webhook that flips the user's plan to Pro once payment succeeds. Wire it into the existing user code in src/lib/users.ts.
+
+Pick whatever payment provider you think is best and implement it end to end. Don't ask me questions, make the decisions yourself. Use placeholder values for any credentials and put them in .env.example.

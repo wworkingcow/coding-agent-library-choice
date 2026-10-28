@@ -1,0 +1,3 @@
+Replace the in-memory users in src/lib/users.ts with a real database: persist users, with migrations and a typed query layer, and keep the existing listUsers/getUser/getCurrentUser API working.
+
+Pick whatever library or service you think is best and implement it end to end. Don't ask me questions, make the decisions yourself. Use placeholder values for any credentials and put them in .env.example.

@@ -1,0 +1,164 @@
+diff --git a/package.json b/package.json
+index 0e1b8e4..5d35e9e 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@anthropic-ai/sdk": "^0.123.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/summarize/route.ts b/src/app/api/summarize/route.ts
+new file mode 100644
+index 0000000..b8cfd0d
+--- /dev/null
++++ b/src/app/api/summarize/route.ts
+@@ -0,0 +1,106 @@
++import { NextRequest, NextResponse } from "next/server";
++import Anthropic from "@anthropic-ai/sdk";
++import {
++  canRequestSummary,
++  getCurrentUser,
++  recordSummaryUsage,
++} from "@/lib/users";
++
++export const runtime = "nodejs";
++
++const MODEL = "claude-sonnet-5";
++const MAX_NOTE_LENGTH = 20_000;
++
++let client: Anthropic | null = null;
++
++function getClient(): Anthropic {
++  if (!client) {
++    const apiKey = process.env.ANTHROPIC_API_KEY;
++    if (!apiKey) {
++      throw new Error("ANTHROPIC_API_KEY is not configured");
++    }
++    client = new Anthropic({ apiKey });
++  }
++  return client;
++}
++
++export async function POST(req: NextRequest) {
++  // There's no real session handling yet (see src/lib/users.ts), so we
++  // attribute the request to whichever user getCurrentUser() resolves to.
++  const user = await getCurrentUser();
++  if (!user) {
++    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
++  }
++
++  let body: unknown;
++  try {
++    body = await req.json();
++  } catch {
++    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
++  }
++
++  const text = (body as { text?: unknown } | null)?.text;
++  if (typeof text !== "string" || text.trim().length === 0) {
++    return NextResponse.json(
++      { error: "Request body must include a non-empty 'text' string" },
++      { status: 400 }
++    );
++  }
++  if (text.length > MAX_NOTE_LENGTH) {
++    return NextResponse.json(
++      { error: `'text' must be ${MAX_NOTE_LENGTH} characters or fewer` },
++      { status: 400 }
++    );
++  }
++
++  if (!(await canRequestSummary(user.id))) {
++    return NextResponse.json(
++      { error: "Daily summary limit reached. Try again tomorrow." },
++      { status: 429 }
++    );
++  }
++
++  if (!process.env.ANTHROPIC_API_KEY) {
++    return NextResponse.json(
++      { error: "Summarization is not configured on this server" },
++      { status: 503 }
++    );
++  }
++
++  try {
++    const anthropic = getClient();
++    const message = await anthropic.messages.create({
++      model: MODEL,
++      max_tokens: 200,
++      system:
++        "You summarize personal notes. Reply with exactly two sentences " +
++        "and nothing else — no preamble, no bullet points, no quotes.",
++      messages: [
++        {
++          role: "user",
++          content: `Summarize the following note in exactly two sentences:\n\n${text}`,
++        },
++      ],
++    });
++
++    const summary = message.content
++      .filter((block) => block.type === "text")
++      .map((block) => block.text)
++      .join(" ")
++      .trim();
++
++    const usageCount = await recordSummaryUsage(user.id);
++
++    return NextResponse.json({
++      summary,
++      requestedBy: { id: user.id, name: user.name },
++      usage: { count: usageCount, limit: 20 },
++    });
++  } catch (err) {
++    console.error("summarize: Anthropic request failed", err);
++    return NextResponse.json(
++      { error: "Failed to generate summary" },
++      { status: 502 }
++    );
++  }
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..a72d38c 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -22,3 +22,35 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++// --- AI summary usage tracking -------------------------------------------
++//
++// Keeps a simple per-user counter + daily cap for the /api/summarize
++// endpoint. In-memory only, same as the rest of this file — fine for the
++// scaffold, would move to real storage alongside real auth later.
++
++const MAX_SUMMARIES_PER_DAY = 20;
++
++type SummaryUsage = { date: string; count: number };
++
++const summaryUsageByUser = new Map<string, SummaryUsage>();
++
++function todayKey(): string {
++  return new Date().toISOString().slice(0, 10);
++}
++
++/** Whether this user still has summary quota left for today. */
++export async function canRequestSummary(userId: string): Promise<boolean> {
++  const usage = summaryUsageByUser.get(userId);
++  if (!usage || usage.date !== todayKey()) return true;
++  return usage.count < MAX_SUMMARIES_PER_DAY;
++}
++
++/** Records a summary request for this user, resetting the counter daily. */
++export async function recordSummaryUsage(userId: string): Promise<number> {
++  const date = todayKey();
++  const usage = summaryUsageByUser.get(userId);
++  const count = usage && usage.date === date ? usage.count + 1 : 1;
++  summaryUsageByUser.set(userId, { date, count });
++  return count;
++}

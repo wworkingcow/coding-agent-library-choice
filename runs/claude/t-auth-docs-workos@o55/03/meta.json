@@ -1,0 +1,7 @@
+{"date":"2026-10-27T15:10:52Z","agent":"claude","task":"t-auth-docs-workos@o55","run":"03",
+ "model":"claude-opus-5-5",
+ "agent_version":"2.1.299 (Claude Code)",
+ "added_deps":"@workos-inc/authkit-nextjs;@workos-inc/node;server-only","files_changed":"16","env_keys":"NEXT_PUBLIC_WORKOS_REDIRECT_URI;WORKOS_API_KEY;WORKOS_CLIENT_ID;WORKOS_COOKIE_PASSWORD",
+ "outcome":"chose","tools":"Bash","web":"no",
+ "seconds":"373","cost_usd":"0.35515739999999996","turns":"13","is_error":"","exit":"0",
+ "model_id":"claude-opus-5-5","api_key_source":"ANTHROPIC_API_KEY","cli_version":"2.1.299"}

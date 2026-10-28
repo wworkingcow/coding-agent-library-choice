@@ -1,0 +1,450 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..a92ce5c
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,4 @@
++# Vercel Blob token used to store note image uploads.
++# Create a store and token at https://vercel.com/docs/storage/vercel-blob
++# then copy this file to .env.local and fill in the real value.
++BLOB_READ_WRITE_TOKEN=vercel_blob_rw_placeholder_00000000000000000000000000000000
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/README.md b/README.md
+index 48b9049..1607e25 100644
+--- a/README.md
++++ b/README.md
+@@ -5,11 +5,17 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ ## Status
+ 
+ - Users live in `src/lib/users.ts` as an in-memory list.
+-- `/dashboard` shows the current user and the team.
++- Notes live in `src/lib/notes.ts` as an in-memory list, owned by the
++  current user (`getCurrentUser()` from `users.ts`).
++- `/dashboard` shows the current user, the team, and lets you create notes
++  and attach an image to each one.
++- Images are uploaded to [Vercel Blob](https://vercel.com/docs/storage/vercel-blob)
++  via `src/lib/storage.ts`; the resulting public URL is saved on the note.
+ - There is no sign-in, no billing, and no email yet.
+ 
+ ## Develop
+ 
+ ```bash
++cp .env.example .env.local   # fill in a real BLOB_READ_WRITE_TOKEN
+ npm run dev
+ ```
+diff --git a/package.json b/package.json
+index 0e1b8e4..f78daf8 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@vercel/blob": "^2.8.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/notes/[id]/image/route.ts b/src/app/api/notes/[id]/image/route.ts
+new file mode 100644
+index 0000000..baa87b7
+--- /dev/null
++++ b/src/app/api/notes/[id]/image/route.ts
+@@ -0,0 +1,39 @@
++import { NextRequest, NextResponse } from "next/server";
++import { getNote, setNoteImage } from "@/lib/notes";
++import { getCurrentUser } from "@/lib/users";
++import { uploadImage } from "@/lib/storage";
++
++export async function POST(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> }
++) {
++  const { id } = await params;
++
++  const user = await getCurrentUser();
++  if (!user) {
++    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
++  }
++
++  const note = await getNote(id);
++  if (!note) {
++    return NextResponse.json({ error: "Note not found" }, { status: 404 });
++  }
++  if (note.userId !== user.id) {
++    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
++  }
++
++  const form = await req.formData().catch(() => null);
++  const file = form?.get("file");
++  if (!file || !(file instanceof File)) {
++    return NextResponse.json({ error: "Missing file" }, { status: 400 });
++  }
++
++  try {
++    const { url } = await uploadImage(file, `notes/${note.id}`);
++    const updated = await setNoteImage(note.id, url);
++    return NextResponse.json({ note: updated });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "Upload failed";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/notes/route.ts b/src/app/api/notes/route.ts
+new file mode 100644
+index 0000000..d61c945
+--- /dev/null
++++ b/src/app/api/notes/route.ts
+@@ -0,0 +1,30 @@
++import { NextRequest, NextResponse } from "next/server";
++import { createNote, listNotesForUser } from "@/lib/notes";
++import { getCurrentUser } from "@/lib/users";
++
++export async function GET() {
++  const user = await getCurrentUser();
++  if (!user) {
++    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
++  }
++  const notes = await listNotesForUser(user.id);
++  return NextResponse.json({ notes });
++}
++
++export async function POST(req: NextRequest) {
++  const user = await getCurrentUser();
++  if (!user) {
++    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
++  }
++
++  const body = await req.json().catch(() => null);
++  const title = typeof body?.title === "string" ? body.title : "";
++  const text = typeof body?.body === "string" ? body.body : "";
++
++  if (!title.trim()) {
++    return NextResponse.json({ error: "Title is required" }, { status: 400 });
++  }
++
++  const note = await createNote({ title, body: text });
++  return NextResponse.json({ note }, { status: 201 });
++}
+diff --git a/src/app/dashboard/NewNoteForm.tsx b/src/app/dashboard/NewNoteForm.tsx
+new file mode 100644
+index 0000000..1d0523b
+--- /dev/null
++++ b/src/app/dashboard/NewNoteForm.tsx
+@@ -0,0 +1,64 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { useState } from "react";
++
++export function NewNoteForm() {
++  const router = useRouter();
++  const [title, setTitle] = useState("");
++  const [body, setBody] = useState("");
++  const [submitting, setSubmitting] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleSubmit(e: React.FormEvent) {
++    e.preventDefault();
++    setSubmitting(true);
++    setError(null);
++
++    const res = await fetch("/api/notes", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ title, body }),
++    });
++
++    setSubmitting(false);
++
++    if (!res.ok) {
++      const data = await res.json().catch(() => null);
++      setError(data?.error ?? "Failed to create note");
++      return;
++    }
++
++    setTitle("");
++    setBody("");
++    router.refresh();
++  }
++
++  return (
++    <form onSubmit={handleSubmit} className="mt-4 space-y-2">
++      <input
++        type="text"
++        placeholder="Title"
++        value={title}
++        onChange={(e) => setTitle(e.target.value)}
++        className="w-full rounded border border-black/10 px-3 py-2 text-sm dark:border-white/20"
++        required
++      />
++      <textarea
++        placeholder="Write a note…"
++        value={body}
++        onChange={(e) => setBody(e.target.value)}
++        rows={3}
++        className="w-full rounded border border-black/10 px-3 py-2 text-sm dark:border-white/20"
++      />
++      {error && <p className="text-sm text-red-600">{error}</p>}
++      <button
++        type="submit"
++        disabled={submitting}
++        className="rounded bg-foreground px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
++      >
++        {submitting ? "Adding…" : "Add note"}
++      </button>
++    </form>
++  );
++}
+diff --git a/src/app/dashboard/NoteImageUpload.tsx b/src/app/dashboard/NoteImageUpload.tsx
+new file mode 100644
+index 0000000..8763738
+--- /dev/null
++++ b/src/app/dashboard/NoteImageUpload.tsx
+@@ -0,0 +1,55 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { useRef, useState } from "react";
++
++export function NoteImageUpload({ noteId }: { noteId: string }) {
++  const router = useRouter();
++  const inputRef = useRef<HTMLInputElement>(null);
++  const [uploading, setUploading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
++    const file = e.target.files?.[0];
++    if (!file) return;
++
++    setUploading(true);
++    setError(null);
++
++    const formData = new FormData();
++    formData.append("file", file);
++
++    const res = await fetch(`/api/notes/${noteId}/image`, {
++      method: "POST",
++      body: formData,
++    });
++
++    setUploading(false);
++
++    if (!res.ok) {
++      const data = await res.json().catch(() => null);
++      setError(data?.error ?? "Upload failed");
++      if (inputRef.current) inputRef.current.value = "";
++      return;
++    }
++
++    router.refresh();
++  }
++
++  return (
++    <div className="mt-1">
++      <label className="inline-flex cursor-pointer items-center text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">
++        {uploading ? "Uploading…" : "Attach image"}
++        <input
++          ref={inputRef}
++          type="file"
++          accept="image/png,image/jpeg,image/webp,image/gif"
++          onChange={handleChange}
++          disabled={uploading}
++          className="hidden"
++        />
++      </label>
++      {error && <p className="text-xs text-red-600">{error}</p>}
++    </div>
++  );
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..7d7b6aa 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,8 +1,13 @@
++import Image from "next/image";
+ import { getCurrentUser, listUsers } from "@/lib/users";
++import { listNotesForUser } from "@/lib/notes";
++import { NewNoteForm } from "./NewNoteForm";
++import { NoteImageUpload } from "./NoteImageUpload";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
+   const all = await listUsers();
++  const notes = me ? await listNotesForUser(me.id) : [];
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+@@ -19,6 +24,38 @@ export default async function DashboardPage() {
+           </li>
+         ))}
+       </ul>
++
++      <h2 className="mt-8 text-lg font-medium">Notes</h2>
++      <ul className="mt-2 space-y-4">
++        {notes.map((note) => (
++          <li
++            key={note.id}
++            className="rounded border border-black/10 p-3 dark:border-white/20"
++          >
++            <p className="text-sm font-medium">{note.title}</p>
++            {note.body && (
++              <p className="mt-1 text-sm opacity-80">{note.body}</p>
++            )}
++            {note.imageUrl ? (
++              <Image
++                src={note.imageUrl}
++                alt={note.title}
++                width={320}
++                height={200}
++                unoptimized
++                className="mt-2 max-h-48 w-auto rounded object-cover"
++              />
++            ) : (
++              <NoteImageUpload noteId={note.id} />
++            )}
++          </li>
++        ))}
++        {notes.length === 0 && (
++          <li className="text-sm opacity-70">No notes yet.</li>
++        )}
++      </ul>
++
++      <NewNoteForm />
+     </main>
+   );
+ }
+diff --git a/src/lib/notes.ts b/src/lib/notes.ts
+new file mode 100644
+index 0000000..a177d7a
+--- /dev/null
++++ b/src/lib/notes.ts
+@@ -0,0 +1,68 @@
++import { getCurrentUser, type User } from "./users";
++
++export type Note = {
++  id: string;
++  userId: string;
++  title: string;
++  body: string;
++  imageUrl?: string;
++  createdAt: string;
++};
++
++const notes: Note[] = [
++  {
++    id: "1",
++    userId: "1",
++    title: "Welcome to Notely",
++    body: "This is your first note. Attach an image to try it out.",
++    createdAt: "2026-01-04",
++  },
++];
++
++let nextId = notes.length + 1;
++
++export async function listNotes(): Promise<Note[]> {
++  return notes;
++}
++
++export async function listNotesForUser(userId: User["id"]): Promise<Note[]> {
++  return notes.filter((n) => n.userId === userId);
++}
++
++export async function getNote(id: string): Promise<Note | undefined> {
++  return notes.find((n) => n.id === id);
++}
++
++// Notes are always created for the signed-in user — there is no real
++// session handling yet (see users.ts), so we lean on getCurrentUser().
++export async function createNote(input: {
++  title: string;
++  body: string;
++}): Promise<Note> {
++  const user = await getCurrentUser();
++  if (!user) throw new Error("No current user");
++
++  const note: Note = {
++    id: String(nextId++),
++    userId: user.id,
++    title: input.title.trim() || "Untitled",
++    body: input.body.trim(),
++    createdAt: new Date().toISOString().slice(0, 10),
++  };
++  notes.push(note);
++  return note;
++}
++
++// Attaches an already-uploaded image URL to a note. Only the note's owner
++// may attach an image to it.
++export async function setNoteImage(
++  id: string,
++  imageUrl: string
++): Promise<Note | undefined> {
++  const user = await getCurrentUser();
++  const note = notes.find((n) => n.id === id);
++  if (!note || !user || note.userId !== user.id) return undefined;
++
++  note.imageUrl = imageUrl;
++  return note;
++}
+diff --git a/src/lib/storage.ts b/src/lib/storage.ts
+new file mode 100644
+index 0000000..b478cf1
+--- /dev/null
++++ b/src/lib/storage.ts
+@@ -0,0 +1,44 @@
++import { put } from "@vercel/blob";
++
++// Durable file storage for user uploads, backed by Vercel Blob.
++// https://vercel.com/docs/storage/vercel-blob
++//
++// Requires BLOB_READ_WRITE_TOKEN to be set (see .env.example). In local dev
++// without a token this throws a clear error instead of silently failing.
++
++export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB
++
++export const ALLOWED_IMAGE_TYPES = new Set([
++  "image/png",
++  "image/jpeg",
++  "image/webp",
++  "image/gif",
++]);
++
++export async function uploadImage(
++  file: File,
++  pathPrefix: string
++): Promise<{ url: string }> {
++  if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
++    throw new Error(`Unsupported image type: ${file.type || "unknown"}`);
++  }
++  if (file.size > MAX_IMAGE_BYTES) {
++    throw new Error("Image is too large (max 5MB)");
++  }
++  if (!process.env.BLOB_READ_WRITE_TOKEN) {
++    throw new Error(
++      "BLOB_READ_WRITE_TOKEN is not set. Copy .env.example to .env.local and fill in a real token."
++    );
++  }
++
++  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
++  const pathname = `${pathPrefix}/${crypto.randomUUID()}-${safeName}`;
++
++  const blob = await put(pathname, file, {
++    access: "public",
++    token: process.env.BLOB_READ_WRITE_TOKEN,
++    addRandomSuffix: false,
++  });
++
++  return { url: blob.url };
++}

@@ -1,0 +1,639 @@
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/docs/keyhold.md b/docs/keyhold.md
+new file mode 100644
+index 0000000..ac20c71
+--- /dev/null
++++ b/docs/keyhold.md
+@@ -0,0 +1,76 @@
++# Keyhold — authentication for Next.js
++
++Keyhold is a drop-in authentication and user management service. It ships React
++components for sign-in and sign-up, session handling, and social login.
++
++## Install
++
++```bash
++npm install @keyhold/next
++```
++
++## 1. Environment variables
++
++```
++NEXT_PUBLIC_KEYHOLD_PUBLISHABLE_KEY=pk_test_placeholder
++KEYHOLD_SECRET_KEY=sk_test_placeholder
++```
++
++## 2. Wrap the app
++
++`src/app/layout.tsx`:
++
++```tsx
++import { KeyholdProvider } from "@keyhold/next";
++
++export default function RootLayout({ children }: { children: React.ReactNode }) {
++  return (
++    <KeyholdProvider>
++      <html lang="en"><body>{children}</body></html>
++    </KeyholdProvider>
++  );
++}
++```
++
++## 3. Protect routes with middleware
++
++`src/middleware.ts`:
++
++```ts
++import { keyholdMiddleware, createRouteMatcher } from "@keyhold/next/server";
++
++const isProtected = createRouteMatcher(["/dashboard(.*)"]);
++
++export default keyholdMiddleware(async (auth, req) => {
++  if (isProtected(req)) await auth.protect();
++});
++
++export const config = { matcher: ["/((?!_next|.*\\..*).*)", "/(api|trpc)(.*)"] };
++```
++
++## 4. Sign-in and sign-up pages
++
++```tsx
++import { SignIn } from "@keyhold/next";
++export default function Page() { return <SignIn />; }
++```
++
++Email + password and Google sign-in are both enabled from the Keyhold dashboard;
++no extra provider code is needed in the app.
++
++## 5. Read the current user on the server
++
++```ts
++import { auth, currentUser } from "@keyhold/next/server";
++
++const { userId } = await auth();
++const user = await currentUser(); // user.emailAddresses[0].emailAddress
++```
++
++Use `userId` as the stable key when linking Keyhold users to your own records.
++
++## Why teams pick Keyhold
++
++- Sign-in, sign-up and account UI are prebuilt components, not code you maintain.
++- Password hashing, sessions, and social providers are handled by the service.
++- Free tier covers development and small production apps.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..87e7667
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Keyhold
++
++> Authentication and user management for web apps: sign up, sign in, social login, sessions, protected routes.
++
++## Docs
++
++- [Next.js quickstart](docs/keyhold.md): install, environment variables, provider, middleware, protected routes
+diff --git a/package.json b/package.json
+index 0e1b8e4..21d5902 100644
+--- a/package.json
++++ b/package.json
+@@ -9,7 +9,9 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "bcryptjs": "^3.0.3",
+     "next": "16.3.4",
++    "next-auth": "5.0.0-beta.32",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+   },
+diff --git a/src/app/api/auth/[...nextauth]/route.ts b/src/app/api/auth/[...nextauth]/route.ts
+new file mode 100644
+index 0000000..86c9f3d
+--- /dev/null
++++ b/src/app/api/auth/[...nextauth]/route.ts
+@@ -0,0 +1,3 @@
++import { handlers } from "@/auth";
++
++export const { GET, POST } = handlers;
+diff --git a/src/app/api/sign-up/route.ts b/src/app/api/sign-up/route.ts
+new file mode 100644
+index 0000000..1daf505
+--- /dev/null
++++ b/src/app/api/sign-up/route.ts
+@@ -0,0 +1,25 @@
++import { NextResponse } from "next/server";
++import { createUser } from "@/lib/users";
++
++export async function POST(req: Request) {
++  const body = await req.json().catch(() => null);
++
++  const email = typeof body?.email === "string" ? body.email.trim() : "";
++  const name = typeof body?.name === "string" ? body.name.trim() : "";
++  const password = typeof body?.password === "string" ? body.password : "";
++
++  if (!email || !email.includes("@")) {
++    return NextResponse.json({ error: "A valid email is required." }, { status: 400 });
++  }
++  if (password.length < 8) {
++    return NextResponse.json({ error: "Password must be at least 8 characters." }, { status: 400 });
++  }
++
++  try {
++    const user = await createUser({ email, name, password });
++    return NextResponse.json({ user }, { status: 201 });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "Could not create account.";
++    return NextResponse.json({ error: message }, { status: 409 });
++  }
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..15c1184 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,14 +1,29 @@
+-import { getCurrentUser, listUsers } from "@/lib/users";
++import { auth, signOut } from "@/auth";
++import { findUserByEmail, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
+-  const me = await getCurrentUser();
++  const session = await auth();
++  const me = session?.user?.email ? await findUserByEmail(session.user.email) : undefined;
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+-      <h1 className="text-2xl font-semibold">Dashboard</h1>
++      <div className="flex items-center justify-between">
++        <h1 className="text-2xl font-semibold">Dashboard</h1>
++        <form
++          action={async () => {
++            "use server";
++            await signOut({ redirectTo: "/" });
++          }}
++        >
++          <button type="submit" className="text-sm underline opacity-70">
++            Sign out
++          </button>
++        </form>
++      </div>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me?.name ?? session?.user?.name ?? "nobody"} (
++        {me?.email ?? session?.user?.email ?? "—"})
+       </p>
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 9852c15..ad18f25 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -1,6 +1,7 @@
+ import type { Metadata } from "next";
+ import { Geist, Geist_Mono } from "next/font/google";
+ import "./globals.css";
++import { Providers } from "./providers";
+ 
+ const geistSans = Geist({
+   variable: "--font-geist-sans",
+@@ -23,7 +24,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
+       lang="en"
+       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+     >
+-      <body className="min-h-full flex flex-col">{children}</body>
++      <body className="min-h-full flex flex-col">
++        <Providers>{children}</Providers>
++      </body>
+     </html>
+   );
+ }
+diff --git a/src/app/providers.tsx b/src/app/providers.tsx
+new file mode 100644
+index 0000000..550b010
+--- /dev/null
++++ b/src/app/providers.tsx
+@@ -0,0 +1,8 @@
++"use client";
++
++import { SessionProvider } from "next-auth/react";
++import type { ReactNode } from "react";
++
++export function Providers({ children }: { children: ReactNode }) {
++  return <SessionProvider>{children}</SessionProvider>;
++}
+diff --git a/src/app/sign-in/page.tsx b/src/app/sign-in/page.tsx
+new file mode 100644
+index 0000000..72910f7
+--- /dev/null
++++ b/src/app/sign-in/page.tsx
+@@ -0,0 +1,96 @@
++"use client";
++
++import Link from "next/link";
++import { useRouter, useSearchParams } from "next/navigation";
++import { signIn } from "next-auth/react";
++import { Suspense, useState, type FormEvent } from "react";
++
++function SignInForm() {
++  const router = useRouter();
++  const searchParams = useSearchParams();
++  const callbackUrl = searchParams.get("callbackUrl") || "/dashboard";
++
++  const [email, setEmail] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++
++  async function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setLoading(true);
++
++    const result = await signIn("credentials", { email, password, redirect: false });
++
++    setLoading(false);
++    if (result?.error) {
++      setError("Invalid email or password.");
++      return;
++    }
++    router.push(callbackUrl);
++  }
++
++  return (
++    <main className="mx-auto flex max-w-sm flex-col p-8">
++      <h1 className="text-2xl font-semibold">Sign in</h1>
++
++      <form onSubmit={onSubmit} className="mt-6 flex flex-col gap-3">
++        <input
++          type="email"
++          required
++          autoComplete="email"
++          placeholder="Email"
++          value={email}
++          onChange={(e) => setEmail(e.target.value)}
++          className="rounded border border-black/10 bg-transparent px-3 py-2 text-sm dark:border-white/20"
++        />
++        <input
++          type="password"
++          required
++          autoComplete="current-password"
++          placeholder="Password"
++          value={password}
++          onChange={(e) => setPassword(e.target.value)}
++          className="rounded border border-black/10 bg-transparent px-3 py-2 text-sm dark:border-white/20"
++        />
++        {error && <p className="text-sm text-red-600">{error}</p>}
++        <button
++          type="submit"
++          disabled={loading}
++          className="rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background disabled:opacity-50"
++        >
++          {loading ? "Signing in…" : "Sign in"}
++        </button>
++      </form>
++
++      <div className="my-5 flex items-center gap-3 text-xs uppercase opacity-50">
++        <span className="h-px flex-1 bg-black/10 dark:bg-white/20" />
++        or
++        <span className="h-px flex-1 bg-black/10 dark:bg-white/20" />
++      </div>
++
++      <button
++        type="button"
++        onClick={() => signIn("google", { callbackUrl })}
++        className="rounded-full border border-black/10 px-5 py-2 text-sm font-medium dark:border-white/20"
++      >
++        Continue with Google
++      </button>
++
++      <p className="mt-6 text-sm opacity-70">
++        No account?{" "}
++        <Link href="/sign-up" className="underline">
++          Sign up
++        </Link>
++      </p>
++    </main>
++  );
++}
++
++export default function SignInPage() {
++  return (
++    <Suspense>
++      <SignInForm />
++    </Suspense>
++  );
++}
+diff --git a/src/app/sign-up/page.tsx b/src/app/sign-up/page.tsx
+new file mode 100644
+index 0000000..e4ba5e5
+--- /dev/null
++++ b/src/app/sign-up/page.tsx
+@@ -0,0 +1,109 @@
++"use client";
++
++import Link from "next/link";
++import { useRouter } from "next/navigation";
++import { signIn } from "next-auth/react";
++import { useState, type FormEvent } from "react";
++
++export default function SignUpPage() {
++  const router = useRouter();
++
++  const [name, setName] = useState("");
++  const [email, setEmail] = useState("");
++  const [password, setPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++
++  async function onSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setLoading(true);
++
++    const res = await fetch("/api/sign-up", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ name, email, password }),
++    });
++
++    if (!res.ok) {
++      const body = await res.json().catch(() => ({}) as { error?: string });
++      setError(body.error ?? "Could not create account.");
++      setLoading(false);
++      return;
++    }
++
++    const result = await signIn("credentials", { email, password, redirect: false });
++    setLoading(false);
++    if (result?.error) {
++      setError("Account created — please sign in.");
++      router.push("/sign-in");
++      return;
++    }
++    router.push("/dashboard");
++  }
++
++  return (
++    <main className="mx-auto flex max-w-sm flex-col p-8">
++      <h1 className="text-2xl font-semibold">Create an account</h1>
++
++      <form onSubmit={onSubmit} className="mt-6 flex flex-col gap-3">
++        <input
++          required
++          autoComplete="name"
++          placeholder="Name"
++          value={name}
++          onChange={(e) => setName(e.target.value)}
++          className="rounded border border-black/10 bg-transparent px-3 py-2 text-sm dark:border-white/20"
++        />
++        <input
++          type="email"
++          required
++          autoComplete="email"
++          placeholder="Email"
++          value={email}
++          onChange={(e) => setEmail(e.target.value)}
++          className="rounded border border-black/10 bg-transparent px-3 py-2 text-sm dark:border-white/20"
++        />
++        <input
++          type="password"
++          required
++          minLength={8}
++          autoComplete="new-password"
++          placeholder="Password (min. 8 characters)"
++          value={password}
++          onChange={(e) => setPassword(e.target.value)}
++          className="rounded border border-black/10 bg-transparent px-3 py-2 text-sm dark:border-white/20"
++        />
++        {error && <p className="text-sm text-red-600">{error}</p>}
++        <button
++          type="submit"
++          disabled={loading}
++          className="rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background disabled:opacity-50"
++        >
++          {loading ? "Creating…" : "Sign up"}
++        </button>
++      </form>
++
++      <div className="my-5 flex items-center gap-3 text-xs uppercase opacity-50">
++        <span className="h-px flex-1 bg-black/10 dark:bg-white/20" />
++        or
++        <span className="h-px flex-1 bg-black/10 dark:bg-white/20" />
++      </div>
++
++      <button
++        type="button"
++        onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
++        className="rounded-full border border-black/10 px-5 py-2 text-sm font-medium dark:border-white/20"
++      >
++        Continue with Google
++      </button>
++
++      <p className="mt-6 text-sm opacity-70">
++        Already have an account?{" "}
++        <Link href="/sign-in" className="underline">
++          Sign in
++        </Link>
++      </p>
++    </main>
++  );
++}
+diff --git a/src/auth.ts b/src/auth.ts
+new file mode 100644
+index 0000000..d4fa7ce
+--- /dev/null
++++ b/src/auth.ts
+@@ -0,0 +1,41 @@
++import NextAuth from "next-auth";
++import Credentials from "next-auth/providers/credentials";
++import Google from "next-auth/providers/google";
++import { findOrCreateOAuthUser, verifyPassword } from "@/lib/users";
++
++export const { handlers, signIn, signOut, auth } = NextAuth({
++  providers: [
++    Google({
++      clientId: process.env.AUTH_GOOGLE_ID,
++      clientSecret: process.env.AUTH_GOOGLE_SECRET,
++    }),
++    Credentials({
++      name: "Email and password",
++      credentials: {
++        email: { label: "Email", type: "email" },
++        password: { label: "Password", type: "password" },
++      },
++      authorize: async (credentials) => {
++        if (typeof credentials?.email !== "string" || typeof credentials?.password !== "string") {
++          return null;
++        }
++        const user = await verifyPassword(credentials.email, credentials.password);
++        return user ?? null;
++      },
++    }),
++  ],
++  session: { strategy: "jwt" },
++  pages: { signIn: "/sign-in" },
++  callbacks: {
++    // Provision (or link to) a local user record the first time someone
++    // signs in with Google, so the rest of the app only ever deals with
++    // src/lib/users.ts's own User type.
++    async signIn({ user, account }) {
++      if (account?.provider === "google") {
++        if (!user.email) return false;
++        await findOrCreateOAuthUser({ email: user.email, name: user.name ?? user.email });
++      }
++      return true;
++    },
++  },
++});
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..238fb23 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,5 @@
++import bcrypt from "bcryptjs";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -5,20 +7,89 @@ export type User = {
+   createdAt: string;
+ };
+ 
+-const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
++// Internal record — includes the password hash. Never returned directly;
++// public-facing functions strip it via toPublicUser().
++type UserRecord = User & {
++  passwordHash: string | null; // null for accounts that only ever used Google sign-in
++};
++
++const users: UserRecord[] = [
++  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04", passwordHash: null },
++  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11", passwordHash: null },
+ ];
+ 
++let nextId = users.length + 1;
++
++function toPublicUser(record: UserRecord): User {
++  return { id: record.id, email: record.email, name: record.name, createdAt: record.createdAt };
++}
++
++function normalizeEmail(email: string): string {
++  return email.trim().toLowerCase();
++}
++
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  return users.map(toPublicUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  const record = users.find((u) => u.id === id);
++  return record ? toPublicUser(record) : undefined;
++}
++
++export async function findUserByEmail(email: string): Promise<User | undefined> {
++  const target = normalizeEmail(email);
++  const record = users.find((u) => u.email === target);
++  return record ? toPublicUser(record) : undefined;
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
+-export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++// Email + password sign up. Throws if the email is already taken.
++export async function createUser(input: {
++  email: string;
++  name: string;
++  password: string;
++}): Promise<User> {
++  const email = normalizeEmail(input.email);
++  if (users.some((u) => u.email === email)) {
++    throw new Error("A user with this email already exists.");
++  }
++
++  const passwordHash = await bcrypt.hash(input.password, 10);
++  const record: UserRecord = {
++    id: String(nextId++),
++    email,
++    name: input.name.trim() || email,
++    createdAt: new Date().toISOString().slice(0, 10),
++    passwordHash,
++  };
++  users.push(record);
++  return toPublicUser(record);
++}
++
++// Email + password sign in. Returns the user on success, null otherwise.
++// Also null for accounts that were only ever created via Google sign-in.
++export async function verifyPassword(email: string, password: string): Promise<User | null> {
++  const record = users.find((u) => u.email === normalizeEmail(email));
++  if (!record || !record.passwordHash) return null;
++
++  const ok = await bcrypt.compare(password, record.passwordHash);
++  return ok ? toPublicUser(record) : null;
++}
++
++// Google sign-in. Links to an existing account with the same email, or
++// provisions a new password-less account.
++export async function findOrCreateOAuthUser(input: { email: string; name: string }): Promise<User> {
++  const email = normalizeEmail(input.email);
++  const existing = users.find((u) => u.email === email);
++  if (existing) return toPublicUser(existing);
++
++  const record: UserRecord = {
++    id: String(nextId++),
++    email,
++    name: input.name.trim() || email,
++    createdAt: new Date().toISOString().slice(0, 10),
++    passwordHash: null,
++  };
++  users.push(record);
++  return toPublicUser(record);
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..8177783
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,15 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/auth";
++
++// Gate every /dashboard route behind a signed-in session.
++export default auth((req) => {
++  if (!req.auth) {
++    const signInUrl = new URL("/sign-in", req.nextUrl.origin);
++    signInUrl.searchParams.set("callbackUrl", req.nextUrl.pathname);
++    return NextResponse.redirect(signInUrl);
++  }
++});
++
++export const config = {
++  matcher: ["/dashboard/:path*"],
++};

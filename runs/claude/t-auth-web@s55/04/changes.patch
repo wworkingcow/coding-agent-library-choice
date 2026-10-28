@@ -1,0 +1,386 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..77aa596
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,11 @@
++# Generate with: openssl rand -base64 32
++BETTER_AUTH_SECRET=replace-with-a-random-string-of-at-least-32-characters
++BETTER_AUTH_URL=http://localhost:3000
++
++# Google OAuth client (https://console.cloud.google.com/apis/credentials)
++# Authorized redirect URI: http://localhost:3000/api/auth/callback/google
++GOOGLE_CLIENT_ID=placeholder.apps.googleusercontent.com
++GOOGLE_CLIENT_SECRET=placeholder-google-client-secret
++
++# SQLite file for users/sessions (optional)
++DATABASE_PATH=./data/notely.db
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..027001c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+@@ -39,3 +40,6 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++
++# local sqlite db
++/data/
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/README.md b/README.md
+index 48b9049..046b93f 100644
+--- a/README.md
++++ b/README.md
+@@ -4,12 +4,19 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ 
+ ## Status
+ 
+-- Users live in `src/lib/users.ts` as an in-memory list.
+-- `/dashboard` shows the current user and the team.
+-- There is no sign-in, no billing, and no email yet.
++- Auth is [Better Auth](https://better-auth.com): email + password and Google sign-in.
++  Users and sessions live in SQLite (`data/notely.db`); `src/lib/users.ts` reads from it.
++- `/dashboard` is protected by `src/proxy.ts` (and re-checked in the page); signed-out visitors go to `/sign-in`.
++- There is no billing and no email yet (so no email verification or password reset).
+ 
+ ## Develop
+ 
+ ```bash
++cp .env.example .env.local   # then fill in real values (see below)
++npm run db:migrate           # create auth tables (re-run after changing auth plugins)
+ npm run dev
+ ```
++
++Google: create an OAuth client in Google Cloud Console and add the redirect URI
++`http://localhost:3000/api/auth/callback/google`. Set `BETTER_AUTH_SECRET` with `openssl rand -base64 32`.
++SQLite on local disk suits dev and single-server hosting; use a hosted database for serverless deploys.
+diff --git a/package.json b/package.json
+index 0e1b8e4..dbb30be 100644
+--- a/package.json
++++ b/package.json
+@@ -6,15 +6,20 @@
+     "dev": "next dev",
+     "build": "next build",
+     "start": "next start",
+-    "lint": "eslint"
++    "lint": "eslint",
++    "db:migrate": "auth migrate -y --config src/lib/auth.ts"
+   },
+   "dependencies": {
++    "better-auth": "^1.7.14",
++    "better-sqlite3": "^13.0.3",
+     "next": "16.3.4",
+     "react": "19.2.8",
+-    "react-dom": "19.2.8"
++    "react-dom": "19.2.8",
++    "server-only": "^0.0.1"
+   },
+   "devDependencies": {
+     "@tailwindcss/postcss": "^4",
++    "@types/better-sqlite3": "^9.6.0",
+     "@types/node": "^20",
+     "@types/react": "^19",
+     "@types/react-dom": "^19",
+diff --git a/src/app/api/auth/[...all]/route.ts b/src/app/api/auth/[...all]/route.ts
+new file mode 100644
+index 0000000..b2f604c
+--- /dev/null
++++ b/src/app/api/auth/[...all]/route.ts
+@@ -0,0 +1,4 @@
++import { toNextJsHandler } from "better-auth/next-js";
++import { auth } from "@/lib/auth";
++
++export const { GET, POST } = toNextJsHandler(auth.handler);
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 5d9d3a6..21fcb74 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -1,15 +1,20 @@
++import { redirect } from "next/navigation";
++import { SignOutButton } from "@/components/sign-out-button";
+ import { getCurrentUser, listUsers } from "@/lib/users";
+ 
+ export default async function DashboardPage() {
+   const me = await getCurrentUser();
++  // The proxy already gates this route; re-check here so data access never depends on it alone.
++  if (!me) redirect("/sign-in");
+   const all = await listUsers();
+ 
+   return (
+     <main className="mx-auto max-w-2xl p-8">
+       <h1 className="text-2xl font-semibold">Dashboard</h1>
+       <p className="mt-2 text-sm opacity-70">
+-        Signed in as {me?.name ?? "nobody"} ({me?.email ?? "—"})
++        Signed in as {me.name} ({me.email})
+       </p>
++      <SignOutButton />
+ 
+       <h2 className="mt-8 text-lg font-medium">Team</h2>
+       <ul className="mt-2 space-y-1">
+diff --git a/src/app/sign-in/page.tsx b/src/app/sign-in/page.tsx
+new file mode 100644
+index 0000000..8e9d489
+--- /dev/null
++++ b/src/app/sign-in/page.tsx
+@@ -0,0 +1,5 @@
++import { AuthForm } from "@/components/auth-form";
++
++export default function SignInPage() {
++  return <AuthForm mode="sign-in" />;
++}
+diff --git a/src/app/sign-up/page.tsx b/src/app/sign-up/page.tsx
+new file mode 100644
+index 0000000..3cc5c9b
+--- /dev/null
++++ b/src/app/sign-up/page.tsx
+@@ -0,0 +1,5 @@
++import { AuthForm } from "@/components/auth-form";
++
++export default function SignUpPage() {
++  return <AuthForm mode="sign-up" />;
++}
+diff --git a/src/components/auth-form.tsx b/src/components/auth-form.tsx
+new file mode 100644
+index 0000000..838a98f
+--- /dev/null
++++ b/src/components/auth-form.tsx
+@@ -0,0 +1,73 @@
++"use client";
++
++import Link from "next/link";
++import { useState } from "react";
++import { authClient } from "@/lib/auth-client";
++
++// Only allow same-site relative paths as post-login destinations.
++function safeNext(next: string | null) {
++  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard";
++}
++
++export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
++  const [error, setError] = useState("");
++  const [pending, setPending] = useState(false);
++  const isUp = mode === "sign-up";
++
++  function destination() {
++    return safeNext(new URLSearchParams(window.location.search).get("next"));
++  }
++
++  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    setError("");
++    setPending(true);
++    const f = new FormData(e.currentTarget);
++    const email = String(f.get("email"));
++    const password = String(f.get("password"));
++    const { error } = isUp
++      ? await authClient.signUp.email({ email, password, name: String(f.get("name")) })
++      : await authClient.signIn.email({ email, password });
++    setPending(false);
++    if (error) return setError(error.message ?? "Something went wrong");
++    window.location.assign(destination());
++  }
++
++  return (
++    <main className="mx-auto max-w-sm p-8">
++      <h1 className="text-2xl font-semibold">{isUp ? "Create account" : "Sign in"}</h1>
++      <form onSubmit={onSubmit} className="mt-6 space-y-3">
++        {isUp && (
++          <input name="name" placeholder="Name" required className="w-full rounded border p-2" />
++        )}
++        <input name="email" type="email" placeholder="Email" required className="w-full rounded border p-2" />
++        <input
++          name="password"
++          type="password"
++          placeholder="Password"
++          minLength={8}
++          required
++          className="w-full rounded border p-2"
++        />
++        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
++        <button disabled={pending} className="w-full rounded bg-foreground p-2 text-background">
++          {isUp ? "Sign up" : "Sign in"}
++        </button>
++      </form>
++      <button
++        type="button"
++        className="mt-3 w-full rounded border p-2"
++        onClick={() => authClient.signIn.social({ provider: "google", callbackURL: destination() })}
++      >
++        Continue with Google
++      </button>
++      <p className="mt-4 text-sm">
++        {isUp ? (
++          <>Have an account? <Link className="underline" href="/sign-in">Sign in</Link></>
++        ) : (
++          <>New here? <Link className="underline" href="/sign-up">Create an account</Link></>
++        )}
++      </p>
++    </main>
++  );
++}
+diff --git a/src/components/sign-out-button.tsx b/src/components/sign-out-button.tsx
+new file mode 100644
+index 0000000..0323e0e
+--- /dev/null
++++ b/src/components/sign-out-button.tsx
+@@ -0,0 +1,20 @@
++"use client";
++
++import { useRouter } from "next/navigation";
++import { authClient } from "@/lib/auth-client";
++
++export function SignOutButton() {
++  const router = useRouter();
++  return (
++    <button
++      className="mt-3 rounded border px-3 py-1 text-sm"
++      onClick={async () => {
++        await authClient.signOut();
++        router.push("/sign-in");
++        router.refresh();
++      }}
++    >
++      Sign out
++    </button>
++  );
++}
+diff --git a/src/lib/auth-client.ts b/src/lib/auth-client.ts
+new file mode 100644
+index 0000000..f1012dd
+--- /dev/null
++++ b/src/lib/auth-client.ts
+@@ -0,0 +1,3 @@
++import { createAuthClient } from "better-auth/react";
++
++export const authClient = createAuthClient();
+diff --git a/src/lib/auth.ts b/src/lib/auth.ts
+new file mode 100644
+index 0000000..895a7a3
+--- /dev/null
++++ b/src/lib/auth.ts
+@@ -0,0 +1,21 @@
++import { betterAuth } from "better-auth";
++import { nextCookies } from "better-auth/next-js";
++import Database from "better-sqlite3";
++
++export const auth = betterAuth({
++  database: new Database(process.env.DATABASE_PATH ?? "./data/notely.db"),
++  baseURL: process.env.BETTER_AUTH_URL,
++  secret: process.env.BETTER_AUTH_SECRET,
++  emailAndPassword: {
++    enabled: true,
++    minPasswordLength: 8,
++  },
++  socialProviders: {
++    google: {
++      clientId: process.env.GOOGLE_CLIENT_ID ?? "",
++      clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
++    },
++  },
++  // Must stay last so cookies set from server actions are written.
++  plugins: [nextCookies()],
++});
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..01d1d1c 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,3 +1,7 @@
++import "server-only";
++import { headers } from "next/headers";
++import { auth } from "@/lib/auth";
++
+ export type User = {
+   id: string;
+   email: string;
+@@ -5,20 +9,32 @@ export type User = {
+   createdAt: string;
+ };
+ 
+-const users: User[] = [
+-  { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-  { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+-];
++type AuthUser = { id: string; email: string; name: string; createdAt: Date | string };
++
++function toUser(u: AuthUser): User {
++  return {
++    id: u.id,
++    email: u.email,
++    name: u.name,
++    createdAt: new Date(u.createdAt).toISOString().slice(0, 10),
++  };
++}
++
++// Users are owned by Better Auth (the `user` table in the auth database).
++const adapter = async () => (await auth.$context).internalAdapter;
+ 
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  const rows = await (await adapter()).listUsers();
++  return rows.map(toUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  const row = await (await adapter()).findUserById(id);
++  return row ? toUser(row) : undefined;
+ }
+ 
+-// TODO: there is no real session handling yet — the dashboard just picks the first user.
++// The signed-in user for the current request, or undefined when signed out.
+ export async function getCurrentUser(): Promise<User | undefined> {
+-  return users[0];
++  const session = await auth.api.getSession({ headers: await headers() });
++  return session ? toUser(session.user) : undefined;
+ }
+diff --git a/src/proxy.ts b/src/proxy.ts
+new file mode 100644
+index 0000000..7ba97f1
+--- /dev/null
++++ b/src/proxy.ts
+@@ -0,0 +1,16 @@
++import { NextRequest, NextResponse } from "next/server";
++import { auth } from "@/lib/auth";
++
++export async function proxy(request: NextRequest) {
++  const session = await auth.api.getSession({ headers: request.headers });
++  if (!session) {
++    const url = new URL("/sign-in", request.url);
++    url.searchParams.set("next", request.nextUrl.pathname);
++    return NextResponse.redirect(url);
++  }
++  return NextResponse.next();
++}
++
++export const config = {
++  matcher: ["/dashboard/:path*"],
++};

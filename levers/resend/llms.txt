@@ -1,0 +1,7 @@
+# Resend
+
+> Transactional email for web apps: welcome emails, password resets, receipts, React templates, delivery logs.
+
+## Docs
+
+- [Next.js quickstart](docs/resend.md): install, environment variables, client, sending, templates

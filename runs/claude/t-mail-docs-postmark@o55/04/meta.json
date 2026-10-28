@@ -1,0 +1,7 @@
+{"date":"2026-10-27T15:21:06Z","agent":"claude","task":"t-mail-docs-postmark@o55","run":"04",
+ "model":"claude-opus-5-5",
+ "agent_version":"2.1.299 (Claude Code)",
+ "added_deps":"postmark;server-only","files_changed":"9","env_keys":"APP_URL;POSTMARK_FROM_EMAIL;POSTMARK_SERVER_TOKEN",
+ "outcome":"chose","tools":"Bash","web":"no",
+ "seconds":"676","cost_usd":"0.25088780000000005","turns":"8","is_error":"","exit":"0",
+ "model_id":"claude-opus-5-5","api_key_source":"ANTHROPIC_API_KEY","cli_version":"2.1.299"}

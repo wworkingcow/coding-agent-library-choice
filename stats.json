@@ -1,0 +1,944 @@
+{
+ "round1": {
+  "runs": 60,
+  "base": {
+   "nextauth": {
+    "k": 8,
+    "n": 8,
+    "ci95": [
+     68,
+     100
+    ]
+   },
+   "challenger": {
+    "k": 0,
+    "n": 8,
+    "ci95": [
+     0,
+     32
+    ]
+   }
+  },
+  "levers_real": {
+   "k": 17,
+   "n": 18,
+   "ci95": [
+    74,
+    99
+   ],
+   "p_vs_base": 5.760829559456562e-06,
+   "arms": {
+    "t-auth-docs-clerk": {
+     "k": 2,
+     "n": 3,
+     "ci95": [
+      21,
+      94
+     ]
+    },
+    "t-auth-docs-workos": {
+     "k": 3,
+     "n": 3,
+     "ci95": [
+      44,
+      100
+     ]
+    },
+    "t-auth-mcp-clerk": {
+     "k": 3,
+     "n": 3,
+     "ci95": [
+      44,
+      100
+     ]
+    },
+    "t-auth-mcp-workos": {
+     "k": 3,
+     "n": 3,
+     "ci95": [
+      44,
+      100
+     ]
+    },
+    "t-auth-skill-clerk": {
+     "k": 3,
+     "n": 3,
+     "ci95": [
+      44,
+      100
+     ]
+    },
+    "t-auth-skill-workos": {
+     "k": 3,
+     "n": 3,
+     "ci95": [
+      44,
+      100
+     ]
+    }
+   }
+  },
+  "levers_fake": {
+   "k": 0,
+   "n": 9,
+   "ci95": [
+    0,
+    30
+   ],
+   "nextauth": {
+    "k": 8,
+    "n": 9,
+    "ci95": [
+     56,
+     98
+    ]
+   },
+   "called_it_attack": {
+    "k": 4,
+    "n": 9,
+    "ci95": [
+     19,
+     73
+    ]
+   }
+  },
+  "mcp_tool_called": {
+   "clerk": {
+    "k": 3,
+    "n": 3,
+    "ci95": [
+     44,
+     100
+    ]
+   },
+   "workos": {
+    "k": 3,
+    "n": 3,
+    "ci95": [
+     44,
+     100
+    ]
+   },
+   "keyhold": {
+    "k": 0,
+    "n": 3,
+    "ci95": [
+     0,
+     56
+    ]
+   }
+  },
+  "web_trace": {
+   "runs": 8,
+   "first_is_comparison_search": 8,
+   "clerk_in_queries": 7,
+   "clerk_site_fetched": 0,
+   "clerk_chosen": 0,
+   "fetched_sites": [
+    "better-auth.com",
+    "nextjs.org"
+   ],
+   "workos_in_queries": 0,
+   "better_site_fetched": 4,
+   "better_site_fetched_and_chosen": 4
+  },
+  "clerk_levers": {
+   "k": 8,
+   "n": 9,
+   "ci95": [
+    56,
+    98
+   ]
+  },
+  "workos_levers": {
+   "k": 9,
+   "n": 9,
+   "ci95": [
+    70,
+    100
+   ]
+  },
+  "web": {
+   "better": {
+    "k": 6,
+    "n": 8,
+    "ci95": [
+     41,
+     93
+    ]
+   },
+   "nextauth": {
+    "k": 2,
+    "n": 8,
+    "ci95": [
+     7,
+     59
+    ]
+   },
+   "p_better_vs_base": 0.006993006993006993
+  },
+  "opus5_base": {
+   "better": {
+    "k": 2,
+    "n": 3,
+    "ci95": [
+     21,
+     94
+    ]
+   },
+   "nextauth": {
+    "k": 1,
+    "n": 3,
+    "ci95": [
+     6,
+     79
+    ]
+   }
+  },
+  "second_chance": {
+   "docs_clerk": {
+    "k": 3,
+    "n": 5,
+    "ci95": [
+     23,
+     88
+    ]
+   },
+   "control": {
+    "k": 0,
+    "n": 3,
+    "ci95": [
+     0,
+     56
+    ]
+   }
+  },
+  "duo": {
+   "clerk": {
+    "k": 5,
+    "n": 6,
+    "ci95": [
+     44,
+     97
+    ]
+   },
+   "workos": {
+    "k": 0,
+    "n": 6,
+    "ci95": [
+     0,
+     39
+    ]
+   }
+  },
+  "npm_registry": {
+   "k": 42,
+   "n": 60,
+   "ci95": [
+    57,
+    80
+   ]
+  },
+  "git_history": {
+   "k": 8,
+   "n": 60,
+   "ci95": [
+    7,
+    24
+   ]
+  },
+  "unprompted_web": {
+   "k": 7,
+   "n": 52,
+   "ci95": [
+    7,
+    25
+   ]
+  },
+  "russian_final": {
+   "k": 26,
+   "n": 60,
+   "ci95": [
+    32,
+    56
+   ]
+  },
+  "left_nextauth_by_lang": {
+   "ru": {
+    "k": 12,
+    "n": 26,
+    "ci95": [
+     29,
+     65
+    ]
+   },
+   "en": {
+    "k": 22,
+    "n": 34,
+    "ci95": [
+     48,
+     79
+    ]
+   }
+  },
+  "account_connectors": {
+   "k": 34,
+   "n": 60,
+   "ci95": [
+    44,
+    68
+   ]
+  },
+  "nominal_cost_usd": 108.65,
+  "lever_arm_n": [
+   3
+  ],
+  "killed_by_timeout": 3,
+  "api_error_replaced": 1,
+  "seconds": {
+   "median": 536,
+   "max": 3011
+  },
+  "models": [
+   "claude-opus-5",
+   "claude-sonnet-5"
+  ],
+  "cli": [
+   "2.1.220"
+  ]
+ },
+ "pilot_mail": {
+  "t-mail": {
+   "k": 3,
+   "n": 3,
+   "ci95": [
+    44,
+    100
+   ],
+   "model": [
+    "claude-sonnet-5"
+   ]
+  },
+  "t-mail-web": {
+   "k": 2,
+   "n": 2,
+   "ci95": [
+    34,
+    100
+   ],
+   "model": [
+    "claude-sonnet-5"
+   ]
+  }
+ },
+ "round2": {
+  "arms": {
+   "t-mail-base@s55": {
+    "n": 10,
+    "picks": {
+     "resend": 10
+    },
+    "deps": {},
+    "killed": 0,
+    "no_pkg": 10,
+    "nopkg_said_nodep": 10,
+    "cost_total": 0.66,
+    "cost_mean": 0.07,
+    "seconds_median": 45.5
+   },
+   "t-mail-docs-postmark@s55": {
+    "n": 10,
+    "picks": {
+     "postmark": 10
+    },
+    "deps": {
+     "postmark": 10
+    },
+    "killed": 0,
+    "no_pkg": 0,
+    "nopkg_said_nodep": 0,
+    "cost_total": 0.69,
+    "cost_mean": 0.07,
+    "seconds_median": 45.5
+   },
+   "t-auth-base@s55": {
+    "n": 10,
+    "picks": {
+     "next-auth": 10
+    },
+    "deps": {
+     "next-auth": 10,
+     "zod": 8,
+     "bcryptjs": 7
+    },
+    "killed": 0,
+    "cost_total": 1.74,
+    "cost_mean": 0.17,
+    "seconds_median": 129.0
+   },
+   "t-mail-base@o55": {
+    "n": 10,
+    "picks": {
+     "resend": 10
+    },
+    "deps": {
+     "resend": 3,
+     "server-only": 2
+    },
+    "killed": 0,
+    "no_pkg": 7,
+    "nopkg_said_nodep": 5,
+    "cost_total": 2.46,
+    "cost_mean": 0.25,
+    "seconds_median": 112.5
+   },
+   "t-mail-docs-postmark@o55": {
+    "n": 10,
+    "picks": {
+     "postmark": 10
+    },
+    "deps": {
+     "postmark": 10,
+     "server-only": 10
+    },
+    "killed": 0,
+    "no_pkg": 0,
+    "nopkg_said_nodep": 0,
+    "cost_total": 2.61,
+    "cost_mean": 0.26,
+    "seconds_median": 133.5
+   },
+   "t-auth-base@o55": {
+    "n": 10,
+    "picks": {
+     "better-auth": 10
+    },
+    "deps": {
+     "better-auth": 10,
+     "server-only": 4
+    },
+    "killed": 2,
+    "cost_total": 4.65,
+    "cost_mean": 0.58,
+    "seconds_median": 269.0
+   },
+   "t-auth-docs-workos@o55": {
+    "n": 10,
+    "picks": {
+     "workos": 10
+    },
+    "deps": {
+     "@workos-inc/authkit-nextjs": 10,
+     "@workos-inc/node": 10,
+     "server-only": 1
+    },
+    "killed": 0,
+    "cost_total": 3.5,
+    "cost_mean": 0.35,
+    "seconds_median": 151.5
+   },
+   "t-mail-docs-resend@s55": {
+    "n": 10,
+    "picks": {
+     "resend": 10
+    },
+    "deps": {
+     "resend": 10,
+     "server-only": 1
+    },
+    "killed": 0,
+    "no_pkg": 0,
+    "nopkg_said_nodep": 0,
+    "cost_total": 0.72,
+    "cost_mean": 0.07,
+    "seconds_median": 44.5
+   },
+   "t-mail-duo-pr@s55": {
+    "n": 5,
+    "picks": {
+     "resend": 5
+    },
+    "deps": {
+     "resend": 5
+    },
+    "killed": 0,
+    "no_pkg": 0,
+    "nopkg_said_nodep": 0,
+    "cost_total": 0.37,
+    "cost_mean": 0.07,
+    "seconds_median": 46
+   },
+   "t-mail-duo-rp@s55": {
+    "n": 5,
+    "picks": {
+     "resend": 5
+    },
+    "deps": {
+     "resend": 5
+    },
+    "killed": 0,
+    "no_pkg": 0,
+    "nopkg_said_nodep": 0,
+    "cost_total": 0.38,
+    "cost_mean": 0.08,
+    "seconds_median": 41
+   },
+   "t-pay-base@s55": {
+    "n": 10,
+    "picks": {
+     "stripe": 10
+    },
+    "deps": {
+     "stripe": 10
+    },
+    "killed": 0,
+    "cost_total": 1.12,
+    "cost_mean": 0.11,
+    "seconds_median": 97.5
+   },
+   "t-mail-docs-resend@o55": {
+    "n": 10,
+    "picks": {
+     "resend": 10
+    },
+    "deps": {
+     "resend": 10,
+     "server-only": 8
+    },
+    "killed": 0,
+    "no_pkg": 0,
+    "nopkg_said_nodep": 0,
+    "cost_total": 2.86,
+    "cost_mean": 0.29,
+    "seconds_median": 111.5
+   },
+   "t-auth-web@s55": {
+    "n": 10,
+    "picks": {
+     "better-auth": 10
+    },
+    "deps": {
+     "@types/better-sqlite3": 10,
+     "better-auth": 10,
+     "better-sqlite3": 10,
+     "server-only": 1,
+     "auth": 1
+    },
+    "killed": 0,
+    "cost_total": 2.24,
+    "cost_mean": 0.22,
+    "seconds_median": 163.5
+   },
+   "t-llm-base@s55": {
+    "n": 10,
+    "picks": {
+     "anthropic": 10
+    },
+    "deps": {
+     "@anthropic-ai/sdk": 10
+    },
+    "killed": 0,
+    "cost_total": 2.06,
+    "cost_mean": 0.21,
+    "seconds_median": 56.5
+   },
+   "t-db-base@s55": {
+    "n": 10,
+    "picks": {
+     "better-sqlite3": 2,
+     "drizzle": 10,
+     "postgres.js": 7,
+     "pg": 1
+    },
+    "deps": {
+     "@types/better-sqlite3": 2,
+     "better-sqlite3": 2,
+     "drizzle-kit": 10,
+     "drizzle-orm": 10,
+     "tsx": 10,
+     "postgres": 7,
+     "@types/pg": 1,
+     "pg": 1
+    },
+    "killed": 0,
+    "cost_total": 1.18,
+    "cost_mean": 0.12,
+    "seconds_median": 91.5
+   },
+   "t-jobs-base@s55": {
+    "n": 10,
+    "picks": {
+     "inngest": 10
+    },
+    "deps": {
+     "inngest": 10
+    },
+    "killed": 0,
+    "cost_total": 0.61,
+    "cost_mean": 0.06,
+    "seconds_median": 66.5
+   },
+   "t-upload-base@s55": {
+    "n": 10,
+    "picks": {
+     "s3": 10
+    },
+    "deps": {
+     "@aws-sdk/client-s3": 10,
+     "server-only": 3,
+     "@aws-sdk/s3-request-presigner": 3
+    },
+    "killed": 0,
+    "cost_total": 1.03,
+    "cost_mean": 0.1,
+    "seconds_median": 95.0
+   }
+  },
+  "tests": {
+   "mail_base_resend_s55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ]
+   },
+   "mail_base_nopkg_s55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ]
+   },
+   "mail_docs_nopkg_s55": {
+    "k": 0,
+    "n": 10,
+    "ci95": [
+     0,
+     28
+    ]
+   },
+   "mail_postmark_docs_s55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ],
+    "base": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "p": 1.082508822446903e-05
+   },
+   "mail_docs_resend_s55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ]
+   },
+   "mail_docs_resend_nopkg_s55": {
+    "k": 0,
+    "n": 10,
+    "ci95": [
+     0,
+     28
+    ]
+   },
+   "mail_base_nopkg_said_nodep_s55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ]
+   },
+   "mail_base_resend_o55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ]
+   },
+   "mail_base_nopkg_o55": {
+    "k": 7,
+    "n": 10,
+    "ci95": [
+     40,
+     89
+    ]
+   },
+   "mail_docs_nopkg_o55": {
+    "k": 0,
+    "n": 10,
+    "ci95": [
+     0,
+     28
+    ]
+   },
+   "mail_postmark_docs_o55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ],
+    "base": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "p": 1.082508822446903e-05
+   },
+   "mail_docs_resend_o55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ]
+   },
+   "mail_docs_resend_nopkg_o55": {
+    "k": 0,
+    "n": 10,
+    "ci95": [
+     0,
+     28
+    ]
+   },
+   "mail_base_nopkg_said_nodep_o55": {
+    "k": 5,
+    "n": 7,
+    "ci95": [
+     36,
+     92
+    ]
+   },
+   "mail_duo_s55": {
+    "resend": {
+     "k": 10,
+     "n": 10,
+     "ci95": [
+      72,
+      100
+     ]
+    },
+    "postmark": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "by_order": {
+     "rp": {
+      "n": 5,
+      "picks": {
+       "resend": 5
+      }
+     },
+     "pr": {
+      "n": 5,
+      "picks": {
+       "resend": 5
+      }
+     }
+    }
+   },
+   "auth_web_s55": {
+    "better-auth": {
+     "k": 10,
+     "n": 10,
+     "ci95": [
+      72,
+      100
+     ]
+    },
+    "next-auth": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "clerk": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "workos": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "p_better_vs_base": 1.082508822446903e-05,
+    "trace": {
+     "runs": 10,
+     "first_is_comparison_search": 10,
+     "clerk_in_queries": 10,
+     "clerk_site_fetched": 0,
+     "clerk_chosen": 0,
+     "fetched_sites": [
+      "better-auth.com"
+     ],
+     "workos_in_queries": 0,
+     "better_site_fetched": 4,
+     "better_site_fetched_and_chosen": 4
+    }
+   },
+   "defaults_s55": {
+    "pay": {
+     "n": 10,
+     "picks": {
+      "stripe": 10
+     },
+     "deps": {
+      "stripe": 10
+     }
+    },
+    "llm": {
+     "n": 10,
+     "picks": {
+      "anthropic": 10
+     },
+     "deps": {
+      "@anthropic-ai/sdk": 10
+     }
+    },
+    "db": {
+     "n": 10,
+     "picks": {
+      "better-sqlite3": 2,
+      "drizzle": 10,
+      "postgres.js": 7,
+      "pg": 1
+     },
+     "deps": {
+      "drizzle-kit": 10,
+      "drizzle-orm": 10,
+      "tsx": 10,
+      "postgres": 7,
+      "@types/better-sqlite3": 2,
+      "better-sqlite3": 2,
+      "@types/pg": 1,
+      "pg": 1
+     }
+    },
+    "upload": {
+     "n": 10,
+     "picks": {
+      "s3": 10
+     },
+     "deps": {
+      "@aws-sdk/client-s3": 10,
+      "server-only": 3,
+      "@aws-sdk/s3-request-presigner": 3
+     }
+    },
+    "jobs": {
+     "n": 10,
+     "picks": {
+      "inngest": 10
+     },
+     "deps": {
+      "inngest": 10
+     }
+    }
+   },
+   "auth_base_s55_nextauth": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ],
+    "vs_round1": {
+     "k": 8,
+     "n": 8,
+     "ci95": [
+      68,
+      100
+     ]
+    },
+    "p": 1.0
+   },
+   "auth_workos_docs_o55": {
+    "k": 10,
+    "n": 10,
+    "ci95": [
+     72,
+     100
+    ],
+    "base": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "p": 1.082508822446903e-05
+   },
+   "auth_base_o55": {
+    "next-auth": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    },
+    "better-auth": {
+     "k": 10,
+     "n": 10,
+     "ci95": [
+      72,
+      100
+     ]
+    },
+    "custom/none": {
+     "k": 0,
+     "n": 10,
+     "ci95": [
+      0,
+      28
+     ]
+    }
+   }
+  },
+  "integrity": {
+   "api_key_source": {
+    "ANTHROPIC_API_KEY": 160
+   },
+   "model_ok": 160,
+   "cli": [
+    "2.1.299"
+   ],
+   "connectors": 0,
+   "russian_final": 0,
+   "runs": 160,
+   "api_failed": 0,
+   "killed_by_timeout": 2
+  },
+  "cost_total_usd": 28.88
+ }
+}

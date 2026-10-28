@@ -1,0 +1,1 @@
+That notification came from a background check that was waiting on the build, which had already finished. Nothing has changed: lint, build and `tsc` all pass, and the summary above still stands. 

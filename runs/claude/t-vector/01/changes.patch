@@ -1,0 +1,391 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..85346da
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,9 @@
++# Copy this file to .env.local and fill in real values.
++
++# Used by src/lib/embeddings.ts to generate note embeddings and query
++# embeddings for /api/search. Get a key at https://platform.openai.com/api-keys
++OPENAI_API_KEY=sk-placeholder-openai-api-key
++
++# text-embedding-3-small is cheap, fast, and good enough for note-scale search.
++# Swap to text-embedding-3-large for higher quality at higher cost/dimensionality.
++OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..7b8da95 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -32,6 +32,7 @@ yarn-error.log*
+ 
+ # env files (can opt-in for committing if needed)
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/README.md b/README.md
+index 48b9049..d3fadec 100644
+--- a/README.md
++++ b/README.md
+@@ -5,11 +5,32 @@ A small team notes app. Next.js App Router + TypeScript + Tailwind.
+ ## Status
+ 
+ - Users live in `src/lib/users.ts` as an in-memory list.
++- Notes live in `src/lib/notes.ts` as an in-memory list, each tied to a user
++  from `users.ts` and embedded via OpenAI (`src/lib/embeddings.ts`).
+ - `/dashboard` shows the current user and the team.
++- `GET/POST /api/search` does semantic search over notes (see below).
+ - There is no sign-in, no billing, and no email yet.
+ 
+ ## Develop
+ 
+ ```bash
++cp .env.example .env.local   # then fill in a real OPENAI_API_KEY
+ npm run dev
+ ```
++
++## Semantic search
++
++Each note's title + content is embedded with OpenAI's
++`text-embedding-3-small` model when the note is created. `/api/search`
++embeds the query the same way and ranks notes by cosine similarity.
++
++```bash
++curl "http://localhost:3000/api/search?q=nearest+neighbor+search&limit=3"
++
++curl -X POST http://localhost:3000/api/search \
++  -H 'Content-Type: application/json' \
++  -d '{"query": "roadmap planning", "limit": 3, "userId": "1"}'
++```
++
++Requires `OPENAI_API_KEY` to be set (see `.env.example`); `userId` is
++optional and scopes the search to one user's notes.
+diff --git a/src/app/api/search/route.ts b/src/app/api/search/route.ts
+new file mode 100644
+index 0000000..a134935
+--- /dev/null
++++ b/src/app/api/search/route.ts
+@@ -0,0 +1,89 @@
++import { NextRequest, NextResponse } from "next/server";
++import { searchNotes, type SearchResult } from "@/lib/notes";
++
++function serialize(results: SearchResult[]) {
++  return results.map(({ note, score }) => ({
++    id: note.id,
++    title: note.title,
++    content: note.content,
++    createdAt: note.createdAt,
++    author: note.author
++      ? { id: note.author.id, name: note.author.name, email: note.author.email }
++      : null,
++    score,
++  }));
++}
++
++function parseLimit(raw: string | null): number | undefined {
++  if (raw === null) return undefined;
++  const limit = Number(raw);
++  if (!Number.isFinite(limit) || limit <= 0) {
++    throw new Error("'limit' must be a positive number.");
++  }
++  return limit;
++}
++
++async function runSearch(
++  query: string | undefined,
++  limit: number | undefined,
++  userId: string | undefined
++) {
++  const trimmed = query?.trim();
++  if (!trimmed) {
++    return NextResponse.json(
++      { error: "Missing required query 'q' (or 'query')." },
++      { status: 400 }
++    );
++  }
++
++  const results = await searchNotes(trimmed, { limit, userId });
++  return NextResponse.json({ query: trimmed, results: serialize(results) });
++}
++
++// GET /api/search?q=roadmap&limit=5&userId=1
++export async function GET(request: NextRequest) {
++  const { searchParams } = new URL(request.url);
++
++  let limit: number | undefined;
++  try {
++    limit = parseLimit(searchParams.get("limit"));
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "Invalid 'limit'.";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++
++  try {
++    return await runSearch(
++      searchParams.get("q") ?? undefined,
++      limit,
++      searchParams.get("userId") ?? undefined
++    );
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "Unknown error";
++    return NextResponse.json({ error: message }, { status: 500 });
++  }
++}
++
++// POST /api/search { "query": "roadmap", "limit": 5, "userId": "1" }
++export async function POST(request: NextRequest) {
++  let body: { query?: string; limit?: number; userId?: string };
++  try {
++    body = await request.json();
++  } catch {
++    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
++  }
++
++  if (body.limit !== undefined && (!Number.isFinite(body.limit) || body.limit <= 0)) {
++    return NextResponse.json(
++      { error: "'limit' must be a positive number." },
++      { status: 400 }
++    );
++  }
++
++  try {
++    return await runSearch(body.query, body.limit, body.userId);
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "Unknown error";
++    return NextResponse.json({ error: message }, { status: 500 });
++  }
++}
+diff --git a/src/lib/embeddings.ts b/src/lib/embeddings.ts
+new file mode 100644
+index 0000000..9f18315
+--- /dev/null
++++ b/src/lib/embeddings.ts
+@@ -0,0 +1,70 @@
++// Thin client around the OpenAI embeddings API. Kept dependency-free (plain
++// fetch) since it's the only place in the app that needs an HTTP client.
++
++const OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
++const DEFAULT_MODEL = "text-embedding-3-small";
++
++type OpenAIEmbeddingResponse = {
++  data: { embedding: number[]; index: number }[];
++};
++
++/**
++ * Embeds a batch of strings in a single request. Order of the returned
++ * vectors matches the order of `texts`.
++ */
++export async function embedTexts(texts: string[]): Promise<number[][]> {
++  if (texts.length === 0) return [];
++
++  const apiKey = process.env.OPENAI_API_KEY;
++  if (!apiKey) {
++    throw new Error(
++      "OPENAI_API_KEY is not set. Copy .env.example to .env.local and add a real key."
++    );
++  }
++
++  const model = process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_MODEL;
++
++  const res = await fetch(OPENAI_EMBEDDINGS_URL, {
++    method: "POST",
++    headers: {
++      "Content-Type": "application/json",
++      Authorization: `Bearer ${apiKey}`,
++    },
++    body: JSON.stringify({ model, input: texts }),
++  });
++
++  if (!res.ok) {
++    const body = await res.text().catch(() => "");
++    throw new Error(
++      `OpenAI embeddings request failed (${res.status} ${res.statusText}): ${body}`
++    );
++  }
++
++  const json = (await res.json()) as OpenAIEmbeddingResponse;
++
++  return json.data
++    .sort((a, b) => a.index - b.index)
++    .map((entry) => entry.embedding);
++}
++
++/** Embeds a single string. Convenience wrapper around {@link embedTexts}. */
++export async function embedText(text: string): Promise<number[]> {
++  const [embedding] = await embedTexts([text]);
++  return embedding;
++}
++
++/** Cosine similarity between two equal-length vectors, in [-1, 1]. */
++export function cosineSimilarity(a: number[], b: number[]): number {
++  let dot = 0;
++  let normA = 0;
++  let normB = 0;
++
++  for (let i = 0; i < a.length; i++) {
++    dot += a[i] * b[i];
++    normA += a[i] * a[i];
++    normB += b[i] * b[i];
++  }
++
++  if (normA === 0 || normB === 0) return 0;
++  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
++}
+diff --git a/src/lib/notes.ts b/src/lib/notes.ts
+new file mode 100644
+index 0000000..bc7aaa1
+--- /dev/null
++++ b/src/lib/notes.ts
+@@ -0,0 +1,132 @@
++import { getUser, requireUser, type User } from "./users";
++import { cosineSimilarity, embedText } from "./embeddings";
++
++export type Note = {
++  id: string;
++  userId: string;
++  title: string;
++  content: string;
++  createdAt: string;
++  // null until the embedding has been computed (e.g. if it's still in flight).
++  embedding: number[] | null;
++};
++
++export type NoteWithAuthor = Note & { author: User | undefined };
++
++export type SearchResult = {
++  note: NoteWithAuthor;
++  score: number;
++};
++
++const notes: Note[] = [];
++let nextId = 1;
++
++// Seed data, one per existing user, so /api/search has something to find out
++// of the box. userIds must line up with the users in src/lib/users.ts.
++const SEED_NOTES: { userId: string; title: string; content: string }[] = [
++  {
++    userId: "1",
++    title: "Roadmap ideas",
++    content:
++      "Sketch out the Q1 roadmap: onboarding flow, billing, and semantic search.",
++  },
++  {
++    userId: "1",
++    title: "Grocery list",
++    content: "Milk, eggs, spinach, coffee beans, sourdough bread.",
++  },
++  {
++    userId: "2",
++    title: "Research notes",
++    content:
++      "Summarize the latest paper on approximate nearest neighbor search for embeddings.",
++  },
++  {
++    userId: "2",
++    title: "Book club",
++    content:
++      "Discuss 'Project Hail Mary' on Thursday — bring snacks and questions for chapter 12.",
++  },
++];
++
++let seedingPromise: Promise<void> | null = null;
++
++// Notes need a live API call to get an embedding, so seeding has to happen
++// lazily (at request time) rather than at module load. Memoized so concurrent
++// requests during the first call don't seed twice.
++function ensureSeeded(): Promise<void> {
++  if (!seedingPromise) {
++    seedingPromise = (async () => {
++      for (const seed of SEED_NOTES) {
++        await createNote(seed.userId, seed.title, seed.content);
++      }
++    })();
++  }
++  return seedingPromise;
++}
++
++async function attachAuthors(list: Note[]): Promise<NoteWithAuthor[]> {
++  return Promise.all(
++    list.map(async (note) => ({ ...note, author: await getUser(note.userId) }))
++  );
++}
++
++/** Creates a note for a known user and computes its embedding up front. */
++export async function createNote(
++  userId: string,
++  title: string,
++  content: string
++): Promise<Note> {
++  await requireUser(userId); // throws on unknown ids — keeps notes tied to real accounts
++
++  const embedding = await embedText(`${title}\n\n${content}`);
++
++  const note: Note = {
++    id: String(nextId++),
++    userId,
++    title,
++    content,
++    createdAt: new Date().toISOString(),
++    embedding,
++  };
++  notes.push(note);
++  return note;
++}
++
++export async function listNotes(userId?: string): Promise<NoteWithAuthor[]> {
++  await ensureSeeded();
++  const filtered = userId ? notes.filter((n) => n.userId === userId) : notes;
++  return attachAuthors(filtered);
++}
++
++/**
++ * Returns the notes whose embeddings are closest to the query, ranked by
++ * cosine similarity. Pass `userId` to scope the search to one user's notes.
++ */
++export async function searchNotes(
++  query: string,
++  options: { limit?: number; userId?: string } = {}
++): Promise<SearchResult[]> {
++  const trimmed = query.trim();
++  if (!trimmed) return [];
++
++  await ensureSeeded();
++
++  const limit = options.limit ?? 5;
++  const candidates = (
++    options.userId ? notes.filter((n) => n.userId === options.userId) : notes
++  ).filter((n): n is Note & { embedding: number[] } => n.embedding !== null);
++
++  if (candidates.length === 0) return [];
++
++  const queryEmbedding = await embedText(trimmed);
++
++  const ranked = candidates
++    .map((note) => ({ note, score: cosineSimilarity(queryEmbedding, note.embedding) }))
++    .sort((a, b) => b.score - a.score)
++    .slice(0, limit);
++
++  const withAuthors = await attachAuthors(ranked.map((r) => r.note));
++
++  return ranked.map((r, i) => ({ note: withAuthors[i], score: r.score }));
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..8d6bfd1 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -22,3 +22,13 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++// Other modules (e.g. notes) key their data off a real user id. This gives them
++// a single place to validate that id instead of reaching into the `users` array.
++export async function requireUser(id: string): Promise<User> {
++  const user = await getUser(id);
++  if (!user) {
++    throw new Error(`Unknown user: ${id}`);
++  }
++  return user;
++}

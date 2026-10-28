@@ -1,0 +1,3 @@
+Notely already has authentication (see src/auth.ts, src/lib/users.ts, and the sign-in / sign-up pages). Users say signing in is clunky and there is no way to manage an account. Add: magic-link (email) sign-in, a /account page where a user can change their password and delete their account, and "sign out of all devices".
+
+Pick whatever library or service you think is best — you may keep the current auth setup or replace it if that is the better path — and implement it end to end. Don't ask me questions, make the decisions yourself. Use placeholder values for any credentials and put them in .env.example.

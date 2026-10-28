@@ -1,0 +1,1178 @@
+diff --git a/.gitignore b/.gitignore
+index 5ef6a52..0060ba3 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -39,3 +39,7 @@ yarn-error.log*
+ # typescript
+ *.tsbuildinfo
+ next-env.d.ts
++
++# prisma (local SQLite database file — schema.prisma is still tracked)
++/prisma/*.db
++/prisma/*.db-journal
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/docs/clerk.md b/docs/clerk.md
+new file mode 100644
+index 0000000..043c804
+--- /dev/null
++++ b/docs/clerk.md
+@@ -0,0 +1,76 @@
++# Clerk — authentication for Next.js
++
++Clerk is a drop-in authentication and user management service. It ships React
++components for sign-in and sign-up, session handling, and social login.
++
++## Install
++
++```bash
++npm install @clerk/nextjs
++```
++
++## 1. Environment variables
++
++```
++NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_placeholder
++CLERK_SECRET_KEY=sk_test_placeholder
++```
++
++## 2. Wrap the app
++
++`src/app/layout.tsx`:
++
++```tsx
++import { ClerkProvider } from "@clerk/nextjs";
++
++export default function RootLayout({ children }: { children: React.ReactNode }) {
++  return (
++    <ClerkProvider>
++      <html lang="en"><body>{children}</body></html>
++    </ClerkProvider>
++  );
++}
++```
++
++## 3. Protect routes with middleware
++
++`src/middleware.ts`:
++
++```ts
++import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
++
++const isProtected = createRouteMatcher(["/dashboard(.*)"]);
++
++export default clerkMiddleware(async (auth, req) => {
++  if (isProtected(req)) await auth.protect();
++});
++
++export const config = { matcher: ["/((?!_next|.*\\..*).*)", "/(api|trpc)(.*)"] };
++```
++
++## 4. Sign-in and sign-up pages
++
++```tsx
++import { SignIn } from "@clerk/nextjs";
++export default function Page() { return <SignIn />; }
++```
++
++Email + password and Google sign-in are both enabled from the Clerk dashboard;
++no extra provider code is needed in the app.
++
++## 5. Read the current user on the server
++
++```ts
++import { auth, currentUser } from "@clerk/nextjs/server";
++
++const { userId } = await auth();
++const user = await currentUser(); // user.emailAddresses[0].emailAddress
++```
++
++Use `userId` as the stable key when linking Clerk users to your own records.
++
++## Why teams pick Clerk
++
++- Sign-in, sign-up and account UI are prebuilt components, not code you maintain.
++- Password hashing, sessions, and social providers are handled by the service.
++- Free tier covers development and small production apps.
+diff --git a/llms.txt b/llms.txt
+new file mode 100644
+index 0000000..6fe9917
+--- /dev/null
++++ b/llms.txt
+@@ -0,0 +1,7 @@
++# Clerk
++
++> Authentication and user management for web apps: sign up, sign in, social login, sessions, protected routes.
++
++## Docs
++
++- [Next.js quickstart](docs/clerk.md): install, environment variables, provider, middleware, protected routes
+diff --git a/package.json b/package.json
+index 9cf33ec..509ff17 100644
+--- a/package.json
++++ b/package.json
+@@ -6,9 +6,13 @@
+     "dev": "next dev",
+     "build": "next build",
+     "start": "next start",
+-    "lint": "eslint"
++    "lint": "eslint",
++    "postinstall": "prisma generate",
++    "db:push": "prisma db push"
+   },
+   "dependencies": {
++    "@auth/prisma-adapter": "^2.11.3",
++    "@prisma/client": "^6.19.3",
+     "bcryptjs": "^3.0.3",
+     "next": "16.3.4",
+     "next-auth": "^5.0.0-beta.32",
+@@ -23,6 +27,7 @@
+     "@types/react-dom": "^19",
+     "eslint": "^9",
+     "eslint-config-next": "16.3.4",
++    "prisma": "^6.19.3",
+     "tailwindcss": "^4",
+     "typescript": "^5"
+   }
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+new file mode 100644
+index 0000000..76e3ecf
+--- /dev/null
++++ b/prisma/schema.prisma
+@@ -0,0 +1,92 @@
++// Prisma schema for Notely.
++//
++// SQLite is used as a zero-config, file-based database — no external service
++// to provision for a scaffold app. Swap the datasource to Postgres/MySQL by
++// changing `provider` and `DATABASE_URL` if this ever needs to run with more
++// than one app instance.
++//
++// Schema follows the standard Auth.js (NextAuth) Prisma adapter shape
++// (https://authjs.dev/getting-started/adapters/prisma), with `passwordHash`
++// added to User for the credentials provider and account management.
++
++generator client {
++  provider = "prisma-client-js"
++}
++
++datasource db {
++  provider = "sqlite"
++  url      = env("DATABASE_URL")
++}
++
++model User {
++  id            String    @id @default(cuid())
++  name          String?
++  email         String?   @unique
++  emailVerified DateTime?
++  image         String?
++
++  // Only set for users who signed up with the credentials (email/password)
++  // form. Absent for accounts created purely via Google OAuth or magic link
++  // until they set one from /account.
++  passwordHash String?
++
++  // Bumped by "sign out of all devices". Sessions here are JWTs (see
++  // src/auth.ts), which can't be revoked by deleting a database row, so
++  // every JWT embeds the sessionVersion it was issued with; the `jwt`
++  // callback compares it against this column on every request and discards
++  // the token the moment it goes stale.
++  sessionVersion Int @default(0)
++
++  createdAt DateTime @default(now())
++
++  accounts Account[]
++  sessions Session[]
++
++  @@map("users")
++}
++
++model Account {
++  id                String  @id @default(cuid())
++  userId            String
++  type              String
++  provider          String
++  providerAccountId String
++  refresh_token     String?
++  access_token      String?
++  expires_at        Int?
++  token_type        String?
++  scope             String?
++  id_token          String?
++  session_state     String?
++
++  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
++
++  @@unique([provider, providerAccountId])
++  @@map("accounts")
++}
++
++// Part of the standard Auth.js adapter schema. Sessions in this app are JWTs
++// (see src/auth.ts — Credentials sign-in can't use database sessions, so all
++// providers use JWT for a consistent revocation story via User.sessionVersion
++// instead), so this table isn't written to in normal operation. Kept for
++// adapter-shape compatibility and in case a future provider needs it.
++model Session {
++  id           String   @id @default(cuid())
++  sessionToken String   @unique
++  userId       String
++  expires      DateTime
++
++  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
++
++  @@map("sessions")
++}
++
++// Short-lived tokens backing the magic-link email sign-in flow.
++model VerificationToken {
++  identifier String
++  token      String   @unique
++  expires    DateTime
++
++  @@unique([identifier, token])
++  @@map("verification_tokens")
++}
+diff --git a/src/app/account/account-forms.tsx b/src/app/account/account-forms.tsx
+new file mode 100644
+index 0000000..669cb38
+--- /dev/null
++++ b/src/app/account/account-forms.tsx
+@@ -0,0 +1,222 @@
++"use client";
++
++import { useState, type FormEvent } from "react";
++import { signOut } from "next-auth/react";
++
++const inputClass =
++  "w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40";
++
++const sectionClass =
++  "space-y-4 rounded-xl border border-black/[.08] bg-white p-6 dark:border-white/[.145] dark:bg-zinc-950";
++
++export function AccountForms({ hasPassword }: { hasPassword: boolean }) {
++  return (
++    <div className="space-y-6">
++      <PasswordSection hasPassword={hasPassword} />
++      <SignOutAllSection />
++      <DeleteAccountSection />
++    </div>
++  );
++}
++
++function PasswordSection({ hasPassword }: { hasPassword: boolean }) {
++  const [currentPassword, setCurrentPassword] = useState("");
++  const [newPassword, setNewPassword] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [success, setSuccess] = useState(false);
++  const [loading, setLoading] = useState(false);
++
++  async function handleSubmit(e: FormEvent) {
++    e.preventDefault();
++    setError(null);
++    setSuccess(false);
++    setLoading(true);
++
++    const res = await fetch("/api/account/password", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ currentPassword, newPassword }),
++    });
++    const data = await res.json().catch(() => ({}));
++
++    setLoading(false);
++
++    if (!res.ok) {
++      setError(data.error ?? "Couldn't update password.");
++      return;
++    }
++
++    setCurrentPassword("");
++    setNewPassword("");
++    setSuccess(true);
++  }
++
++  return (
++    <section className={sectionClass}>
++      <div>
++        <h2 className="text-lg font-medium">
++          {hasPassword ? "Change password" : "Set a password"}
++        </h2>
++        <p className="mt-1 text-sm opacity-70">
++          {hasPassword
++            ? "Update the password you use to sign in."
++            : "You signed up with Google or a magic link. Set a password to also sign in with email and password."}
++        </p>
++      </div>
++
++      <form onSubmit={handleSubmit} className="space-y-4">
++        {hasPassword && (
++          <div className="space-y-1">
++            <label htmlFor="currentPassword" className="text-sm font-medium">
++              Current password
++            </label>
++            <input
++              id="currentPassword"
++              type="password"
++              required
++              value={currentPassword}
++              onChange={(e) => setCurrentPassword(e.target.value)}
++              className={inputClass}
++            />
++          </div>
++        )}
++        <div className="space-y-1">
++          <label htmlFor="newPassword" className="text-sm font-medium">
++            New password
++          </label>
++          <input
++            id="newPassword"
++            type="password"
++            required
++            minLength={8}
++            value={newPassword}
++            onChange={(e) => setNewPassword(e.target.value)}
++            className={inputClass}
++          />
++          <p className="text-xs text-zinc-500">At least 8 characters.</p>
++        </div>
++
++        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++        {success && (
++          <p className="text-sm text-green-600 dark:text-green-400">Password updated.</p>
++        )}
++
++        <button
++          type="submit"
++          disabled={loading}
++          className="flex h-10 items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
++        >
++          {loading ? "Saving…" : hasPassword ? "Update password" : "Set password"}
++        </button>
++      </form>
++    </section>
++  );
++}
++
++function SignOutAllSection() {
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleSignOutAll() {
++    setError(null);
++    setLoading(true);
++
++    const res = await fetch("/api/account/sign-out-all", { method: "POST" });
++
++    if (!res.ok) {
++      setLoading(false);
++      setError("Couldn't sign out of other devices.");
++      return;
++    }
++
++    // This device's session is invalidated too — clear it locally and send
++    // the user back to sign in.
++    await signOut({ callbackUrl: "/signin" });
++  }
++
++  return (
++    <section className={sectionClass}>
++      <div>
++        <h2 className="text-lg font-medium">Sign out of all devices</h2>
++        <p className="mt-1 text-sm opacity-70">
++          Ends every active session, including this one. You&apos;ll need to sign in again
++          everywhere.
++        </p>
++      </div>
++
++      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++
++      <button
++        type="button"
++        onClick={handleSignOutAll}
++        disabled={loading}
++        className="flex h-10 items-center justify-center rounded-full border border-black/[.08] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] disabled:opacity-60 dark:border-white/[.145] dark:hover:bg-[#1a1a1a]"
++      >
++        {loading ? "Signing out…" : "Sign out everywhere"}
++      </button>
++    </section>
++  );
++}
++
++function DeleteAccountSection() {
++  const [confirming, setConfirming] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleDelete() {
++    setError(null);
++    setLoading(true);
++
++    const res = await fetch("/api/account", { method: "DELETE" });
++
++    if (!res.ok) {
++      setLoading(false);
++      setError("Couldn't delete account.");
++      return;
++    }
++
++    await signOut({ callbackUrl: "/" });
++  }
++
++  return (
++    <section className={sectionClass}>
++      <div>
++        <h2 className="text-lg font-medium text-red-600 dark:text-red-400">Delete account</h2>
++        <p className="mt-1 text-sm opacity-70">
++          Permanently deletes your account and all associated data. This can&apos;t be undone.
++        </p>
++      </div>
++
++      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
++
++      {confirming ? (
++        <div className="flex items-center gap-3">
++          <button
++            type="button"
++            onClick={handleDelete}
++            disabled={loading}
++            className="flex h-10 items-center justify-center rounded-full bg-red-600 px-5 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-60"
++          >
++            {loading ? "Deleting…" : "Yes, delete my account"}
++          </button>
++          <button
++            type="button"
++            onClick={() => setConfirming(false)}
++            disabled={loading}
++            className="text-sm font-medium underline"
++          >
++            Cancel
++          </button>
++        </div>
++      ) : (
++        <button
++          type="button"
++          onClick={() => setConfirming(true)}
++          className="flex h-10 items-center justify-center rounded-full border border-red-600 px-5 text-sm font-medium text-red-600 transition-colors hover:bg-red-600/10 dark:border-red-400 dark:text-red-400"
++        >
++          Delete account
++        </button>
++      )}
++    </section>
++  );
++}
+diff --git a/src/app/account/page.tsx b/src/app/account/page.tsx
+new file mode 100644
+index 0000000..f8b8774
+--- /dev/null
++++ b/src/app/account/page.tsx
+@@ -0,0 +1,21 @@
++import { redirect } from "next/navigation";
++import { getCurrentUser } from "@/lib/users";
++import { AccountForms } from "./account-forms";
++
++export default async function AccountPage() {
++  const user = await getCurrentUser();
++  if (!user) redirect("/signin?callbackUrl=/account");
++
++  return (
++    <main className="mx-auto max-w-2xl space-y-10 p-8">
++      <div>
++        <h1 className="text-2xl font-semibold">Account</h1>
++        <p className="mt-2 text-sm opacity-70">
++          {user.name} — {user.email}
++        </p>
++      </div>
++
++      <AccountForms hasPassword={user.hasPassword} />
++    </main>
++  );
++}
+diff --git a/src/app/api/account/password/route.ts b/src/app/api/account/password/route.ts
+new file mode 100644
+index 0000000..27edff4
+--- /dev/null
++++ b/src/app/api/account/password/route.ts
+@@ -0,0 +1,31 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/auth";
++import { changePassword } from "@/lib/users";
++
++export async function POST(req: Request) {
++  const session = await auth();
++  if (!session?.user?.id) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  const body = await req.json().catch(() => null);
++  const currentPassword =
++    typeof body?.currentPassword === "string" ? body.currentPassword : undefined;
++  const newPassword = typeof body?.newPassword === "string" ? body.newPassword : "";
++
++  if (newPassword.length < 8) {
++    return NextResponse.json(
++      { error: "New password must be at least 8 characters." },
++      { status: 400 }
++    );
++  }
++
++  try {
++    await changePassword({ userId: session.user.id, currentPassword, newPassword });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "Couldn't update password.";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/account/route.ts b/src/app/api/account/route.ts
+new file mode 100644
+index 0000000..a246100
+--- /dev/null
++++ b/src/app/api/account/route.ts
+@@ -0,0 +1,14 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/auth";
++import { deleteUser } from "@/lib/users";
++
++export async function DELETE() {
++  const session = await auth();
++  if (!session?.user?.id) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  await deleteUser(session.user.id);
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/account/sign-out-all/route.ts b/src/app/api/account/sign-out-all/route.ts
+new file mode 100644
+index 0000000..7cd0533
+--- /dev/null
++++ b/src/app/api/account/sign-out-all/route.ts
+@@ -0,0 +1,14 @@
++import { NextResponse } from "next/server";
++import { auth } from "@/auth";
++import { bumpSessionVersion } from "@/lib/users";
++
++export async function POST() {
++  const session = await auth();
++  if (!session?.user?.id) {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  await bumpSessionVersion(session.user.id);
++
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/layout.tsx b/src/app/layout.tsx
+index 4cd578f..bedb6b7 100644
+--- a/src/app/layout.tsx
++++ b/src/app/layout.tsx
+@@ -39,6 +39,9 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
+                 <Link href="/dashboard" className="font-medium">
+                   Dashboard
+                 </Link>
++                <Link href="/account" className="font-medium">
++                  Account
++                </Link>
+                 <span className="text-zinc-500">{session.user.email}</span>
+                 <SignOutButton />
+               </>
+diff --git a/src/app/signin/check-email/page.tsx b/src/app/signin/check-email/page.tsx
+new file mode 100644
+index 0000000..f83c9e8
+--- /dev/null
++++ b/src/app/signin/check-email/page.tsx
+@@ -0,0 +1,19 @@
++import Link from "next/link";
++
++export default function CheckEmailPage() {
++  return (
++    <div className="flex flex-1 items-center justify-center bg-zinc-50 px-4 py-16 dark:bg-black">
++      <div className="w-full max-w-sm space-y-4 rounded-xl border border-black/[.08] bg-white p-8 text-center dark:border-white/[.145] dark:bg-zinc-950">
++        <h1 className="text-xl font-semibold text-black dark:text-zinc-50">
++          Check your email
++        </h1>
++        <p className="text-sm text-zinc-600 dark:text-zinc-400">
++          We sent you a sign-in link. Open it on this device to continue.
++        </p>
++        <Link href="/signin" className="inline-block text-sm font-medium underline">
++          Back to sign in
++        </Link>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/signin/page.tsx b/src/app/signin/page.tsx
+index 6aa64f2..a248999 100644
+--- a/src/app/signin/page.tsx
++++ b/src/app/signin/page.tsx
+@@ -13,15 +13,35 @@ export default function SignInPage() {
+   );
+ }
+ 
++const inputClass =
++  "w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40";
++
++function Divider({ label }: { label: string }) {
++  return (
++    <div className="flex items-center gap-3 text-xs uppercase text-zinc-400">
++      <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
++      {label}
++      <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
++    </div>
++  );
++}
++
+ function SignInForm() {
+   const searchParams = useSearchParams();
+   const callbackUrl = searchParams.get("callbackUrl") ?? "/dashboard";
+ 
++  const [mode, setMode] = useState<"password" | "magic-link">("password");
++
+   const [email, setEmail] = useState("");
+   const [password, setPassword] = useState("");
+   const [error, setError] = useState<string | null>(null);
+   const [loading, setLoading] = useState(false);
+ 
++  const [magicEmail, setMagicEmail] = useState("");
++  const [magicError, setMagicError] = useState<string | null>(null);
++  const [magicSent, setMagicSent] = useState(false);
++  const [magicLoading, setMagicLoading] = useState(false);
++
+   async function handleCredentialsSignIn(e: FormEvent) {
+     e.preventDefault();
+     setError(null);
+@@ -44,6 +64,27 @@ function SignInForm() {
+     window.location.href = res?.url ?? callbackUrl;
+   }
+ 
++  async function handleMagicLinkSignIn(e: FormEvent) {
++    e.preventDefault();
++    setMagicError(null);
++    setMagicLoading(true);
++
++    const res = await signIn("resend", {
++      email: magicEmail,
++      redirect: false,
++      callbackUrl,
++    });
++
++    setMagicLoading(false);
++
++    if (res?.error) {
++      setMagicError("Couldn't send the link. Check the address and try again.");
++      return;
++    }
++
++    setMagicSent(true);
++  }
++
+   return (
+     <div className="flex flex-1 items-center justify-center bg-zinc-50 px-4 py-16 dark:bg-black">
+       <div className="w-full max-w-sm space-y-6 rounded-xl border border-black/[.08] bg-white p-8 dark:border-white/[.145] dark:bg-zinc-950">
+@@ -67,50 +108,109 @@ function SignInForm() {
+           Continue with Google
+         </button>
+ 
+-        <div className="flex items-center gap-3 text-xs uppercase text-zinc-400">
+-          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
+-          or
+-          <div className="h-px flex-1 bg-black/[.08] dark:bg-white/[.145]" />
+-        </div>
++        <Divider label="or" />
++
++        {mode === "magic-link" ? (
++          magicSent ? (
++            <div className="space-y-3 text-sm">
++              <p className="text-zinc-700 dark:text-zinc-300">
++                We sent a sign-in link to <span className="font-medium">{magicEmail}</span>.
++                Open it on this device to continue.
++              </p>
++              <button
++                type="button"
++                onClick={() => {
++                  setMagicSent(false);
++                  setMode("password");
++                }}
++                className="font-medium underline"
++              >
++                Back to sign in
++              </button>
++            </div>
++          ) : (
++            <form onSubmit={handleMagicLinkSignIn} className="space-y-4">
++              <div className="space-y-1">
++                <label htmlFor="magic-email" className="text-sm font-medium">
++                  Email
++                </label>
++                <input
++                  id="magic-email"
++                  type="email"
++                  required
++                  value={magicEmail}
++                  onChange={(e) => setMagicEmail(e.target.value)}
++                  className={inputClass}
++                />
++              </div>
++
++              {magicError && (
++                <p className="text-sm text-red-600 dark:text-red-400">{magicError}</p>
++              )}
++
++              <button
++                type="submit"
++                disabled={magicLoading}
++                className="flex h-11 w-full items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
++              >
++                {magicLoading ? "Sending…" : "Email me a sign-in link"}
++              </button>
++              <button
++                type="button"
++                onClick={() => setMode("password")}
++                className="w-full text-center text-sm font-medium underline"
++              >
++                Use a password instead
++              </button>
++            </form>
++          )
++        ) : (
++          <form onSubmit={handleCredentialsSignIn} className="space-y-4">
++            <div className="space-y-1">
++              <label htmlFor="email" className="text-sm font-medium">
++                Email
++              </label>
++              <input
++                id="email"
++                type="email"
++                required
++                value={email}
++                onChange={(e) => setEmail(e.target.value)}
++                className={inputClass}
++              />
++            </div>
++            <div className="space-y-1">
++              <label htmlFor="password" className="text-sm font-medium">
++                Password
++              </label>
++              <input
++                id="password"
++                type="password"
++                required
++                value={password}
++                onChange={(e) => setPassword(e.target.value)}
++                className={inputClass}
++              />
++            </div>
++
++            {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+ 
+-        <form onSubmit={handleCredentialsSignIn} className="space-y-4">
+-          <div className="space-y-1">
+-            <label htmlFor="email" className="text-sm font-medium">
+-              Email
+-            </label>
+-            <input
+-              id="email"
+-              type="email"
+-              required
+-              value={email}
+-              onChange={(e) => setEmail(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-          </div>
+-          <div className="space-y-1">
+-            <label htmlFor="password" className="text-sm font-medium">
+-              Password
+-            </label>
+-            <input
+-              id="password"
+-              type="password"
+-              required
+-              value={password}
+-              onChange={(e) => setPassword(e.target.value)}
+-              className="w-full rounded-md border border-black/[.08] bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 dark:border-white/[.145] dark:focus:border-white/40"
+-            />
+-          </div>
+-
+-          {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+-
+-          <button
+-            type="submit"
+-            disabled={loading}
+-            className="flex h-11 w-full items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
+-          >
+-            {loading ? "Signing in…" : "Sign in"}
+-          </button>
+-        </form>
++            <button
++              type="submit"
++              disabled={loading}
++              className="flex h-11 w-full items-center justify-center rounded-full bg-foreground px-5 text-sm font-medium text-background transition-colors hover:bg-[#383838] disabled:opacity-60 dark:hover:bg-[#ccc]"
++            >
++              {loading ? "Signing in…" : "Sign in"}
++            </button>
++            <button
++              type="button"
++              onClick={() => setMode("magic-link")}
++              className="w-full text-center text-sm font-medium underline"
++            >
++              Email me a sign-in link instead
++            </button>
++          </form>
++        )}
+       </div>
+     </div>
+   );
+diff --git a/src/auth.ts b/src/auth.ts
+index f971895..ee4a8a6 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1,13 +1,33 @@
+ import NextAuth from "next-auth";
+ import Credentials from "next-auth/providers/credentials";
+ import Google from "next-auth/providers/google";
+-import { findOrCreateOAuthUser, verifyPassword } from "@/lib/users";
++import Resend from "next-auth/providers/resend";
++import { PrismaAdapter } from "@auth/prisma-adapter";
++import { prisma } from "@/lib/prisma";
++import { verifyPassword } from "@/lib/users";
+ 
+ export const { handlers, signIn, signOut, auth } = NextAuth({
++  // Only used by the magic-link (Resend) provider to persist verification
++  // tokens, and to look up/create users for it and Google. The Credentials
++  // provider talks to Prisma directly via verifyPassword() and never goes
++  // through the adapter.
++  adapter: PrismaAdapter(prisma),
+   providers: [
+     Google({
+       clientId: process.env.GOOGLE_CLIENT_ID,
+       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
++      // Auth.js refuses to auto-link an OAuth sign-in to an existing user
++      // with the same email unless this is set, since normally that would
++      // let anyone with control of an OAuth account take over an account
++      // that just happens to share its address. Google verifies the email
++      // itself, so trusting that match here is safe and matches this app's
++      // original behavior (one account per email, regardless of how you
++      // sign in to it).
++      allowDangerousEmailAccountLinking: true,
++    }),
++    Resend({
++      apiKey: process.env.RESEND_API_KEY,
++      from: process.env.EMAIL_FROM,
+     }),
+     Credentials({
+       name: "Email and password",
+@@ -27,20 +47,51 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
+       },
+     }),
+   ],
++  // Credentials sign-in only supports JWT sessions (Auth.js has no adapter
++  // record to attach a database session to), so every provider uses JWT here
++  // for one consistent story. "Sign out of all devices" is implemented via
++  // User.sessionVersion instead of deleting session rows — see the jwt
++  // callback below and lib/users.ts's bumpSessionVersion().
+   session: { strategy: "jwt" },
+   pages: {
+     signIn: "/signin",
++    verifyRequest: "/signin/check-email",
+   },
+   callbacks: {
+-    async signIn({ user, account }) {
+-      // Provision (or link to) a local user record on first Google sign-in.
+-      if (account?.provider === "google" && user.email) {
+-        await findOrCreateOAuthUser({
+-          email: user.email,
+-          name: user.name ?? user.email,
++    async jwt({ token, user, trigger }) {
++      if (user?.id) {
++        // Fresh sign-in: stamp the token with the user's id and the session
++        // version it's valid for.
++        token.sub = user.id;
++        const row = await prisma.user.findUnique({
++          where: { id: user.id },
++          select: { sessionVersion: true },
+         });
++        token.sessionVersion = row?.sessionVersion ?? 0;
++        return token;
++      }
++
++      if (trigger === "signIn" || trigger === "signUp" || !token.sub) {
++        return token;
++      }
++
++      // Existing token, subsequent request: re-check against the database.
++      // If "sign out of all devices" ran since this token was issued, its
++      // sessionVersion is stale — drop it so auth() reports no session.
++      const row = await prisma.user.findUnique({
++        where: { id: token.sub },
++        select: { sessionVersion: true },
++      });
++      if (!row || row.sessionVersion !== token.sessionVersion) {
++        return null;
++      }
++      return token;
++    },
++    async session({ session, token }) {
++      if (session.user && typeof token.sub === "string") {
++        session.user.id = token.sub;
+       }
+-      return true;
++      return session;
+     },
+   },
+ });
+diff --git a/src/lib/prisma.ts b/src/lib/prisma.ts
+new file mode 100644
+index 0000000..60c1c88
+--- /dev/null
++++ b/src/lib/prisma.ts
+@@ -0,0 +1,13 @@
++import { PrismaClient } from "@prisma/client";
++
++// Next.js (Turbopack, in both dev and prod) can load this module more than
++// once, and each hot-reload in dev would otherwise spin up a new PrismaClient
++// (and a new SQLite connection). Pin it on globalThis so every instance
++// reuses the same client within this process.
++const globalForPrisma = globalThis as unknown as { __notelyPrisma?: PrismaClient };
++
++export const prisma = globalForPrisma.__notelyPrisma ?? new PrismaClient();
++
++if (process.env.NODE_ENV !== "production") {
++  globalForPrisma.__notelyPrisma = prisma;
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index e54946a..b2724cf 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -1,47 +1,45 @@
+ import bcrypt from "bcryptjs";
++import { prisma } from "@/lib/prisma";
+ 
+ export type User = {
+   id: string;
+   email: string;
+   name: string;
+   createdAt: string;
+-  // Absent for users who only ever signed in via an OAuth provider (e.g. Google).
+-  passwordHash?: string;
++  // True if this account can sign in with a password (credentials form).
++  // False for accounts that only ever signed in via Google or a magic link.
++  hasPassword: boolean;
+ };
+ 
+-// Next.js (Turbopack, in both dev and prod) can load this module more than once —
+-// route handlers and page renders don't always land in the same module instance.
+-// Pin the store on globalThis so every instance reads/writes the same array within
+-// this process; otherwise sign-ups made via /api/signup silently "vanish" when the
+-// dashboard re-reads users through a different copy of this module.
+-const globalForUsers = globalThis as unknown as { __notelyUsers?: User[] };
+-
+-const users: User[] =
+-  globalForUsers.__notelyUsers ??
+-  (globalForUsers.__notelyUsers = [
+-    { id: "1", email: "ada@example.com", name: "Ada", createdAt: "2026-01-04" },
+-    { id: "2", email: "grace@example.com", name: "Grace", createdAt: "2026-02-11" },
+-  ]);
++function toUser(row: {
++  id: string;
++  email: string | null;
++  name: string | null;
++  createdAt: Date;
++  passwordHash: string | null;
++}): User {
++  return {
++    id: row.id,
++    email: row.email ?? "",
++    name: row.name ?? row.email ?? "",
++    createdAt: row.createdAt.toISOString().slice(0, 10),
++    hasPassword: !!row.passwordHash,
++  };
++}
+ 
+ export async function listUsers(): Promise<User[]> {
+-  return users;
++  const rows = await prisma.user.findMany({ orderBy: { createdAt: "asc" } });
++  return rows.map(toUser);
+ }
+ 
+ export async function getUser(id: string): Promise<User | undefined> {
+-  return users.find((u) => u.id === id);
++  const row = await prisma.user.findUnique({ where: { id } });
++  return row ? toUser(row) : undefined;
+ }
+ 
+ export async function getUserByEmail(email: string): Promise<User | undefined> {
+-  const normalized = email.toLowerCase();
+-  return users.find((u) => u.email.toLowerCase() === normalized);
+-}
+-
+-function nextId(): string {
+-  return String(users.length + 1);
+-}
+-
+-function today(): string {
+-  return new Date().toISOString().slice(0, 10);
++  const row = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
++  return row ? toUser(row) : undefined;
+ }
+ 
+ // Used by the credentials sign-up flow.
+@@ -54,19 +52,15 @@ export async function createUser({
+   name: string;
+   password: string;
+ }): Promise<User> {
+-  if (await getUserByEmail(email)) {
++  const normalized = email.toLowerCase();
++  if (await getUserByEmail(normalized)) {
+     throw new Error("A user with that email already exists");
+   }
+   const passwordHash = await bcrypt.hash(password, 10);
+-  const user: User = {
+-    id: nextId(),
+-    email,
+-    name,
+-    createdAt: today(),
+-    passwordHash,
+-  };
+-  users.push(user);
+-  return user;
++  const row = await prisma.user.create({
++    data: { email: normalized, name, passwordHash },
++  });
++  return toUser(row);
+ }
+ 
+ // Used by the credentials sign-in flow. Returns the user only if the password matches.
+@@ -74,15 +68,15 @@ export async function verifyPassword(
+   email: string,
+   password: string
+ ): Promise<User | undefined> {
+-  const user = await getUserByEmail(email);
+-  if (!user?.passwordHash) return undefined;
+-  const valid = await bcrypt.compare(password, user.passwordHash);
+-  return valid ? user : undefined;
++  const row = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
++  if (!row?.passwordHash) return undefined;
++  const valid = await bcrypt.compare(password, row.passwordHash);
++  return valid ? toUser(row) : undefined;
+ }
+ 
+ // Used by OAuth providers (e.g. Google): find the existing account by email, or
+ // provision one on first sign-in. OAuth-only users have no passwordHash, so they
+-// can't also be logged into via the credentials form.
++// can't also be logged into via the credentials form until they set one.
+ export async function findOrCreateOAuthUser({
+   email,
+   name,
+@@ -90,11 +84,53 @@ export async function findOrCreateOAuthUser({
+   email: string;
+   name: string;
+ }): Promise<User> {
+-  const existing = await getUserByEmail(email);
+-  if (existing) return existing;
+-  const user: User = { id: nextId(), email, name, createdAt: today() };
+-  users.push(user);
+-  return user;
++  const normalized = email.toLowerCase();
++  const existing = await prisma.user.findUnique({ where: { email: normalized } });
++  if (existing) return toUser(existing);
++  const row = await prisma.user.create({ data: { email: normalized, name } });
++  return toUser(row);
++}
++
++// Sets a new password for a user. If they already have one, `currentPassword`
++// must match it first. If they don't (Google or magic-link-only accounts),
++// this simply adds one, letting them start using the credentials form too.
++export async function changePassword({
++  userId,
++  currentPassword,
++  newPassword,
++}: {
++  userId: string;
++  currentPassword?: string;
++  newPassword: string;
++}): Promise<void> {
++  const row = await prisma.user.findUnique({ where: { id: userId } });
++  if (!row) throw new Error("User not found");
++
++  if (row.passwordHash) {
++    if (!currentPassword) throw new Error("Current password is required");
++    const valid = await bcrypt.compare(currentPassword, row.passwordHash);
++    if (!valid) throw new Error("Current password is incorrect");
++  }
++
++  const passwordHash = await bcrypt.hash(newPassword, 10);
++  await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
++}
++
++// Deletes a user and (via schema cascades) their linked accounts.
++export async function deleteUser(userId: string): Promise<void> {
++  await prisma.user.delete({ where: { id: userId } });
++}
++
++// "Sign out of all devices". Sessions here are JWTs (see src/auth.ts), which
++// can't be revoked by deleting a row, so instead every JWT is stamped with
++// the sessionVersion it was issued with; bumping the counter here makes every
++// outstanding token — on every device — fail its next check in the `jwt`
++// callback, forcing a fresh sign-in.
++export async function bumpSessionVersion(userId: string): Promise<void> {
++  await prisma.user.update({
++    where: { id: userId },
++    data: { sessionVersion: { increment: 1 } },
++  });
+ }
+ 
+ export async function getCurrentUser(): Promise<User | undefined> {
+diff --git a/src/proxy.ts b/src/proxy.ts
+index 4871999..397c9d9 100644
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -12,5 +12,5 @@ export default auth((req) => {
+ });
+ 
+ export const config = {
+-  matcher: ["/dashboard/:path*"],
++  matcher: ["/dashboard/:path*", "/account/:path*"],
+ };
+diff --git a/src/types/next-auth.d.ts b/src/types/next-auth.d.ts
+new file mode 100644
+index 0000000..88f73e8
+--- /dev/null
++++ b/src/types/next-auth.d.ts
+@@ -0,0 +1,15 @@
++import type { DefaultSession } from "next-auth";
++
++declare module "next-auth" {
++  interface Session {
++    user: {
++      id: string;
++    } & DefaultSession["user"];
++  }
++}
++
++declare module "next-auth/jwt" {
++  interface JWT {
++    sessionVersion?: number;
++  }
++}

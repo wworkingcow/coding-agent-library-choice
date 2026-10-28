@@ -1,0 +1,168 @@
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..643577d
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,9 @@
++<!-- BEGIN:nextjs-agent-rules -->
++
++# This is NOT the Next.js you know
++
++This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
++
++This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
++
++<!-- END:nextjs-agent-rules -->
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..43c994c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1 @@
++@AGENTS.md
+diff --git a/package.json b/package.json
+index 0e1b8e4..5d35e9e 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint"
+   },
+   "dependencies": {
++    "@anthropic-ai/sdk": "^0.123.0",
+     "next": "16.3.4",
+     "react": "19.2.8",
+     "react-dom": "19.2.8"
+diff --git a/src/app/api/summarize/route.ts b/src/app/api/summarize/route.ts
+new file mode 100644
+index 0000000..097f83b
+--- /dev/null
++++ b/src/app/api/summarize/route.ts
+@@ -0,0 +1,40 @@
++import { NextRequest, NextResponse } from "next/server";
++import { requireCurrentUser } from "@/lib/users";
++import { summarizeNote } from "@/lib/summarize";
++
++export async function POST(request: NextRequest) {
++  let user;
++  try {
++    user = await requireCurrentUser();
++  } catch {
++    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
++  }
++
++  let body: unknown;
++  try {
++    body = await request.json();
++  } catch {
++    return NextResponse.json(
++      { error: "Request body must be JSON." },
++      { status: 400 }
++    );
++  }
++
++  const text = (body as { text?: unknown } | null)?.text;
++  if (typeof text !== "string" || !text.trim()) {
++    return NextResponse.json(
++      { error: "`text` is required and must be a non-empty string." },
++      { status: 400 }
++    );
++  }
++
++  try {
++    const summary = await summarizeNote(text);
++    return NextResponse.json({ summary, summarizedFor: user.id });
++  } catch (err) {
++    console.error("[/api/summarize] failed:", err);
++    const message = err instanceof Error ? err.message : "Failed to summarize note.";
++    const status = message.includes("ANTHROPIC_API_KEY") ? 500 : 502;
++    return NextResponse.json({ error: message }, { status });
++  }
++}
+diff --git a/src/lib/summarize.ts b/src/lib/summarize.ts
+new file mode 100644
+index 0000000..1d3ea8b
+--- /dev/null
++++ b/src/lib/summarize.ts
+@@ -0,0 +1,64 @@
++import Anthropic from "@anthropic-ai/sdk";
++
++// Fast/cheap model — good fit for a short summarization task like this one.
++// Override via ANTHROPIC_SUMMARY_MODEL if you want a more capable model.
++const MODEL = process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-haiku-4-5-20251001";
++
++const MAX_INPUT_LENGTH = 20_000;
++
++let client: Anthropic | null = null;
++
++function getClient(): Anthropic {
++  const apiKey = process.env.ANTHROPIC_API_KEY;
++  if (!apiKey) {
++    throw new Error(
++      "ANTHROPIC_API_KEY is not set. Copy .env.example to .env.local and add your key."
++    );
++  }
++  if (!client) {
++    client = new Anthropic({ apiKey });
++  }
++  return client;
++}
++
++/**
++ * Summarizes a note's text into exactly two sentences using an LLM.
++ * Throws on empty input, oversized input, or upstream/API errors.
++ */
++export async function summarizeNote(text: string): Promise<string> {
++  const trimmed = text.trim();
++  if (!trimmed) {
++    throw new Error("Note text is empty.");
++  }
++  if (trimmed.length > MAX_INPUT_LENGTH) {
++    throw new Error(`Note text is too long (max ${MAX_INPUT_LENGTH} characters).`);
++  }
++
++  const anthropic = getClient();
++  const message = await anthropic.messages.create({
++    model: MODEL,
++    max_tokens: 200,
++    system:
++      "You summarize notes for a note-taking app called Notely. " +
++      "Reply with exactly two sentences of plain text summarizing the note. " +
++      "No preamble, no markdown, no bullet points, no quotes around the summary.",
++    messages: [
++      {
++        role: "user",
++        content: `Summarize the following note in exactly two sentences:\n\n${trimmed}`,
++      },
++    ],
++  });
++
++  const summary = message.content
++    .filter((block): block is Anthropic.TextBlock => block.type === "text")
++    .map((block) => block.text)
++    .join(" ")
++    .trim();
++
++  if (!summary) {
++    throw new Error("The model returned an empty summary.");
++  }
++
++  return summary;
++}
+diff --git a/src/lib/users.ts b/src/lib/users.ts
+index 1b4b6c1..f63ad97 100644
+--- a/src/lib/users.ts
++++ b/src/lib/users.ts
+@@ -22,3 +22,13 @@ export async function getUser(id: string): Promise<User | undefined> {
+ export async function getCurrentUser(): Promise<User | undefined> {
+   return users[0];
+ }
++
++// Used by API routes (e.g. /api/summarize) that need an authenticated user
++// and should reject the request rather than silently falling back.
++export async function requireCurrentUser(): Promise<User> {
++  const user = await getCurrentUser();
++  if (!user) {
++    throw new Error("Not signed in.");
++  }
++  return user;
++}
